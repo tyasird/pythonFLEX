@@ -1,0 +1,63 @@
+[project]
+name = "pythonFLEX"
+version = "0.1.0"
+description = "pythonFLEX is a benchmarking toolkit for evaluating CRISPR screen results against biological gold standards. The toolkit computes gene-level and complex-level performance metrics, helping researchers systematically assess the biological relevance and resolution of their CRISPR screening data."
+readme = "README.md"
+authors = [
+    { name = "Yasir Demirtaş", email = "tyasird@hotmail.com" }
+]
+requires-python = ">=3.9"
+
+
+# Exclude the input folder
+exclude = ["src/pythonflex/input/*", "src/pythonflex/output/*", "src/pythonflex/examples/output/*", 
+ "src/pythonflex/examples/.tmp/*"]
+
+
+dependencies = [
+    "adjustText",
+    "art",
+    "bitarray",
+    "emoji",
+    "ipython",
+    "joblib",
+    "loguru",
+    "matplotlib",
+    "numba",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "python-slugify",
+    "scikit-learn",
+    "scipy",
+    "tqdm",
+    "importlib-resources"  # <- Only needed for Python < 3.9
+]
+
+[project.scripts]
+pythonflex = "pythonflex:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.ruff]
+ignore = ["F541"]
+
+[tool.setuptools.package-data]
+pythonflex = ["data/**/*.parquet", "data/**/*.csv", "data/**/*.tsv", "data/**/*.json", "data/**/*.txt", "data/**/*.xlsx", "data/**/*.xls", "data/**/*.h5", "data/**/*.hdf5"]
+
+[tool.hatch.build]
+exclude = ["**/result.pkl", "examples/output"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pythonFLEX"]
+
+[tool.uv.sources]
+pythonflex = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pythonflex",
+]
