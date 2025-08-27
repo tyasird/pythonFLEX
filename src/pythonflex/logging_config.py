@@ -3,7 +3,7 @@ import emoji
 from loguru import logger as global_logger
 from typing import TYPE_CHECKING
 
-pkg_logger = global_logger.bind(name="pyflex")
+pkg_logger = global_logger.bind(name="pythonflex")
 
 
 class CustomLogger:

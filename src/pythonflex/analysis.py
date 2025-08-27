@@ -72,7 +72,7 @@ def initialize(config={}):
     log.set_visible_levels(visible_levels)
 
     log.info("******************************************************************")
-    log.info("🧬 pyFLEX: Systematic CRISPR screen benchmarking framework")
+    log.info("🧬 pythonFLEX: Systematic CRISPR screen benchmarking framework")
     log.info("******************************************************************")
     log.started("Initialization")
 
@@ -91,7 +91,7 @@ def initialize(config={}):
     os.makedirs(output_folder, exist_ok=True)
     log.progress(f"Output folder '{output_folder}' ensured to exist.")
     log.done("Initialization completed. ")
-    tprint("pyFLEX",font="standard")
+    tprint("FLEX",font="standard")
 
 
 

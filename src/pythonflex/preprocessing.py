@@ -151,7 +151,7 @@ def load_gold_standard():
     if gold_standard_source in gold_standard_files:
         # Load predefined gold standard from package resources
         filename = gold_standard_files[gold_standard_source]
-        filename_path = resources.files("pyflex.data").joinpath(filename)
+        filename_path = resources.files("pythonflex.data").joinpath(filename)
         if not filename_path.exists():  # Check if the file exists
             raise ValueError(f"Invalid Gold Standard type: {gold_standard_source}. File not found.")
         terms = pd.read_parquet(filename_path)  # type: ignore
