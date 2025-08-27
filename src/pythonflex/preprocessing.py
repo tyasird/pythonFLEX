@@ -10,7 +10,7 @@ tqdm.pandas()
 
 
 def get_example_data_path(filename: str):
-    return resources.files("pyflex.data").joinpath("dataset").joinpath(filename)
+    return resources.files("pythonflex.data").joinpath("dataset").joinpath(filename)
 
 
 def _load_file(filepath, ext):
