@@ -172,15 +172,14 @@ def pra(dataset_name, matrix, is_corr=False):
         pr_auc = metrics.auc(recall, precision)
         df["precision"] = precision
         df["recall"] = recall
-
+    
     log.info(f"PR-AUC: {pr_auc:.4f}, Number of true positives: {df['prediction'].sum()}")
     dsave(df, "pra", dataset_name)
     dsave(pr_auc, "pr_auc", dataset_name)
+    dsave( _corrected_auc(df) , "corrected_pr_auc", dataset_name)
+
     log.done(f"Global PRA completed for {dataset_name}")
-    return df, pr_auc
-
-
-
+    return df
 
 
 
@@ -188,6 +187,9 @@ def pra(dataset_name, matrix, is_corr=False):
 # --------------------------------------------------------------------------
 # helper functions for PRA per-complex analysis
 # --------------------------------------------------------------------------
+
+def _corrected_auc(df: pd.DataFrame) -> float:
+    return np.trapz(df["precision"], df["recall"]) - df["precision"].iloc[-1]
 
 def _build_gene_to_pair_indices(pairwise_df):
     indices = pairwise_df.index.values
@@ -240,10 +242,15 @@ def _dump_pairwise_memmap(df: pd.DataFrame, tag: str) -> Path:
 
 
 
-def _init_worker(memmap_path, gene_to_pair_indices):
+# Global variables for worker processes (compatible with older joblib)
+PAIRWISE_DF = None
+GENE2IDX = None
+
+def _init_worker_globals(memmap_path, gene_to_pair_indices):
+    """Initialize global variables for worker processes"""
     global PAIRWISE_DF, GENE2IDX
     PAIRWISE_DF = load(memmap_path)        
-    GENE2IDX    = gene_to_pair_indices                   
+    GENE2IDX = gene_to_pair_indices
 
 
 
@@ -263,42 +270,52 @@ def delete_memmap(memmap_path, log, wait_seconds=0.1):
 # --------------------------------------------------------------------------
 # Process each chunk of terms
 # --------------------------------------------------------------------------
-def _process_chunk(chunk_terms, min_genes):
-    pairwise_df = PAIRWISE_DF
-    gene_to_pair_indices = GENE2IDX
-    local_auc_scores = {}
+def _process_chunk(chunk_terms, min_genes, memmap_path, gene_to_pair_indices):
+    """Process a chunk of terms - compatible with older joblib versions"""
+    try:
+        # Load data in each worker (compatible with older joblib)
+        pairwise_df = load(memmap_path)
+        local_auc_scores = {}
+        local_corrected_auc_scores = {}
 
-    for idx, row in chunk_terms.iterrows():
-        gene_set = set(row.used_genes)
-        if len(gene_set) < min_genes:
-            continue
+        for idx, row in chunk_terms.iterrows():
+            gene_set = set(row.used_genes)
+            if len(gene_set) < min_genes:
+                continue
 
-        candidate_indices = bitarray(len(pairwise_df))
-        for g in gene_set:
-            if g in gene_to_pair_indices:
-                candidate_indices[gene_to_pair_indices[g]] = True
-        if not candidate_indices.any():
-            continue
+            candidate_indices = bitarray(len(pairwise_df))
+            for g in gene_set:
+                if g in gene_to_pair_indices:
+                    candidate_indices[gene_to_pair_indices[g]] = True
+            if not candidate_indices.any():
+                continue
 
-        selected = np.unpackbits(candidate_indices).view(bool)[:len(pairwise_df)]
-        sub_df   = pairwise_df.iloc[selected]
+            selected = np.unpackbits(candidate_indices).view(bool)[:len(pairwise_df)]
+            sub_df   = pairwise_df.iloc[selected]
 
-        complex_id = str(idx)
-        pattern    = r'(?:^|;)' + re.escape(complex_id) + r'(?:;|$)'
-        true_label = sub_df["complex_ids"].str.contains(pattern, regex=True).astype(int)
-        mask       = (sub_df["complex_ids"] == "") | (true_label == 1)
-        preds      = true_label[mask]
+            complex_id = str(idx)
+            pattern    = r'(?:^|;)' + re.escape(complex_id) + r'(?:;|$)'
+            true_label = sub_df["complex_ids"].str.contains(pattern, regex=True).astype(int)
+            mask       = (sub_df["complex_ids"] == "") | (true_label == 1)
+            preds      = true_label[mask]
 
-        if preds.sum() == 0:
-            continue
+            if preds.sum() == 0:
+                continue
 
-        tp_cum   = preds.cumsum()
-        precision = tp_cum / (np.arange(len(preds)) + 1)
-        recall    = tp_cum / tp_cum.iloc[-1]
-        if len(recall) >= 2 and recall.iloc[-1] != 0:
-            local_auc_scores[idx] = metrics.auc(recall, precision)
+            tp_cum   = preds.cumsum()
+            precision = tp_cum / (np.arange(len(preds)) + 1)
+            recall    = tp_cum / tp_cum.iloc[-1]
+            if len(recall) >= 2 and recall.iloc[-1] != 0:
+                # Compute regular AUC
+                local_auc_scores[idx] = metrics.auc(recall, precision)
+                # Compute corrected AUC using the same logic as _corrected_auc function
+                local_corrected_auc_scores[idx] = np.trapz(precision, recall) - precision.iloc[-1]
 
-    return local_auc_scores
+        return {'auc': local_auc_scores, 'corrected_auc': local_corrected_auc_scores}
+    
+    except Exception as e:
+        # Return error info for debugging
+        return {'error': str(e), 'chunk_size': len(chunk_terms)}
 
 
 
@@ -345,26 +362,23 @@ def pra_percomplex(dataset_name, matrix, is_corr=False, chunk_size=200):
     results = None
     
     try:
-        # Simplified parallel execution without progress callback interference
+        # Compatible parallel execution for older joblib versions
         log.started("Processing chunks in parallel")
-        with tqdm(total=len(chunks), desc="Per-complex PRA") as pbar:
-            results = Parallel(
-                n_jobs=8,
-                temp_folder=os.path.dirname(memmap_path),     
-                max_nbytes=None,                              
-                mmap_mode="r",
-                initializer=_init_worker,
-                initargs=(memmap_path, gene_to_pair_indices),
-                verbose=0  # Reduce joblib verbosity
-            )(delayed(_process_chunk)(chunk, min_genes) for chunk in chunks)
-            
-            # Update progress bar once all tasks are complete
-            pbar.update(len(chunks))
+        
+        # Use a more conservative approach with older joblib
+        results = Parallel(
+            n_jobs=min(4, len(chunks)),  # Limit to 4 workers or number of chunks
+            temp_folder=os.path.dirname(memmap_path),     
+            max_nbytes='100M',  # Set memory limit
+            verbose=1  # Show progress
+        )(delayed(_process_chunk)(chunk, min_genes, memmap_path, gene_to_pair_indices) 
+          for chunk in tqdm(chunks, desc="Per-complex PRA"))
         
         log.done("Processing chunks in parallel")
         
     except Exception as e:
         log.error(f"Error during parallel processing: {e}")
+        log.error(f"Error type: {type(e).__name__}")
         # Still try to clean up the memmap file
         try:
             if os.path.exists(memmap_path):
@@ -383,19 +397,29 @@ def pra_percomplex(dataset_name, matrix, is_corr=False, chunk_size=200):
         except OSError as e:
             log.warning(f"Failed to remove memmap file {memmap_path}: {e}")
 
-    # Merge results with error handling
+    # Merge results with enhanced error handling
     auc_scores = {}
+    corrected_auc_scores = {}
     if results:
-        for res in results:
+        for i, res in enumerate(results):
             if isinstance(res, dict):
-                auc_scores.update(res)
-            elif isinstance(res, tuple) and res[0] is None:
-                log.error(res[1])  # Log the error message from the chunk
+                if 'error' in res:
+                    log.error(f"Error in chunk {i}: {res['error']}")
+                elif 'auc' in res and 'corrected_auc' in res:
+                    # New format with both AUC types
+                    auc_scores.update(res['auc'])
+                    corrected_auc_scores.update(res['corrected_auc'])
+                else:
+                    # Fallback for old format (backward compatibility)
+                    auc_scores.update(res)
+            elif isinstance(res, tuple) and len(res) >= 2 and res[0] is None:
+                log.error(f"Chunk {i} error: {res[1]}")
             else:
-                log.error(f"Ignoring unexpected chunk result: {res}")
+                log.warning(f"Unexpected result type from chunk {i}: {type(res)} - {res}")
     
     # Add the computed AUC scores to the terms DataFrame.
     terms["auc_score"] = pd.Series(auc_scores)
+    terms["corrected_auc_score"] = pd.Series(corrected_auc_scores)
     terms.drop(columns=["hash"], inplace=True)
     dsave(terms, "pra_percomplex", dataset_name)
     log.done(f"Per-complex PRA completed.")
@@ -1296,4 +1320,3 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     dsave(pr_auc, "pr_auc", dataset_name)
 #     log.done(f"Global PRA completed for {dataset_name}")
 #     return df, pr_auc
-

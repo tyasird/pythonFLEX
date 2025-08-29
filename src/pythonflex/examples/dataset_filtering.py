@@ -8,6 +8,8 @@ model = pd.read_csv("../../../../datasets/depmap/24Q4/Model.csv",index_col=0)
 df.columns = df.columns.str.split(" \\(").str[0]
 df = df.T
 
+#%%
+
 # %%
 # get ModelID of selected disease for example OncotreePrimaryDisease==Melanoma
 melanoma = model[model.OncotreePrimaryDisease=="Melanoma"].index.unique().values

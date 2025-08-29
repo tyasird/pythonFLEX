@@ -470,9 +470,10 @@ def plot_auc_scores():
     plot_config = config["plotting"]
     pra_dict = dload("pr_auc")
 
-    # Prepare data
-    datasets = list(pra_dict.keys())
-    auc_scores = list(pra_dict.values())
+
+    sorted_items = sorted(pra_dict.items(), key=lambda x: x[1], reverse=True)
+    datasets = [k for k, _ in sorted_items]
+    auc_scores = [v for _, v in sorted_items]
 
     # Create figure and axis
     fig, ax = plt.subplots()
@@ -483,7 +484,7 @@ def plot_auc_scores():
     colors = [cmap(i / (num_datasets + 1)) for i in range(1, num_datasets + 1)]
 
     # Plot bars
-    bars = ax.bar(datasets, auc_scores, color=colors, edgecolor="black")
+    ax.bar(datasets, auc_scores, color=colors, edgecolor="black")
 
     # Set y-axis limits dynamically
     ax.set_ylim(0, max(auc_scores) + 0.01)
@@ -491,6 +492,7 @@ def plot_auc_scores():
     # Set title and labels
     ax.set_title("AUC scores for the datasets")
     ax.set_ylabel("AUC score")
+    plt.xticks(rotation=45, ha="right")
 
     # Add grid (already handled by rcParams)
     ax.grid(axis='y')

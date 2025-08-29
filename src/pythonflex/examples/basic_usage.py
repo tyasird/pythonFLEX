@@ -6,15 +6,20 @@ Demonstrates initialization, data loading, analysis, and plotting.
 import pythonflex as flex
 
 inputs = {
-    "SNF": {
-        "path":  "C:/Users/yd/Desktop/projects/datasets/fused_similarity_network.csv",
+    "Melanoma (63 Screens)": {
+        "path": flex.get_example_data_path("melanoma_cell_lines_500_genes.csv"), 
         "sort": "high"
     },
-    "miss_SNF": {
-        "path":  "C:/Users/yd/Desktop/projects/datasets/miss_snf_fused_similarity_network.csv",
+    "Liver (24 Screens)": {
+        "path": flex.get_example_data_path("liver_cell_lines_500_genes.csv"), 
         "sort": "high"
-    }
+    },
+    "Neuroblastoma (37 Screens)": {
+        "path": flex.get_example_data_path("neuroblastoma_cell_lines_500_genes.csv"), 
+        "sort": "high"
+    },
 }
+
 
 #%%
 
@@ -51,8 +56,8 @@ terms, genes_in_terms = flex.load_gold_standard()
 #%%
 # Run analysis
 for name, dataset in data.items():
-    df, pr_auc = flex.pra(name, dataset, is_corr=True)
-    fpc = flex.pra_percomplex(name, dataset, is_corr=True) 
+    pra = flex.pra(name, dataset, is_corr=False)
+    fpc = flex.pra_percomplex(name, dataset, is_corr=False) 
     cc = flex.complex_contributions(name)
 
 
@@ -60,7 +65,7 @@ for name, dataset in data.items():
 # Generate plots
 flex.plot_auc_scores()
 flex.plot_precision_recall_curve()
-flex.plot_percomplex_scatter()
+flex.plot_percomplex_scatter(n_top=20)
 flex.plot_percomplex_scatter_bysize()
 flex.plot_significant_complexes()
 flex.plot_complex_contributions()
@@ -82,27 +87,3 @@ flex.save_results_to_csv()
 
 
 
-# %%
-import os
-import glob
-
-inputs = {
-    "depmap all": {
-        "path":  "../../../../datasets/depmap/24Q4/depmap_geneeffect_all_cellines.csv",
-        "sort": "high"
-    }
-}
-
-# Now auto-discover the rest of the CSVs in the folder
-DATA_DIR = "../../../../datasets/depmap/24Q4/subset/"
-for path in glob.glob(os.path.join(DATA_DIR, "*.csv")):
-
-    # Derive the key name from filename (without extension)
-    key = os.path.splitext(os.path.basename(path))[0]
-    inputs[key] = {
-        "path": path,
-        "sort": "high"
-    }
-
-# inputs now has "depmap all" first, then one entry per CSV in DATA_DIR
-print(inputs)
