@@ -23,7 +23,7 @@ from .logging_config import log
 from .preprocessing import filter_matrix_by_genes
 from .utils import dsave, dload, _sanitize
 
-
+import matplotlib as mpl
 
 def deep_update(source, overrides):
     """Recursively update the source dict with the overrides."""
@@ -40,7 +40,7 @@ def initialize(config={}):
 
     default_config = {
         "min_genes_in_complex": 3,
-        "min_genes_per_complex_analysis": 3,
+        "min_genes_per_complex_analysis": 2,
         "output_folder": "output",
         "gold_standard": "CORUM",
         "color_map": "RdYlBu",
@@ -48,7 +48,7 @@ def initialize(config={}):
         "plotting": {
             "save_plot": True,
             "show_plot": True,
-            "output_type": "png",
+            "output_type": "pdf",
         },
         "preprocessing": {
             "normalize": False,
@@ -95,31 +95,105 @@ def initialize(config={}):
 
 
 
-def update_matploblib_config(config={}):
-    log.progress("Updating matplotlib settings.")
-    plt.rcParams.update({
-        "font.family": "DejaVu Sans",        # ← change if you prefer Arial, etc.
-        "mathtext.fontset": "dejavusans",
-        'font.size': 7,                # General font size
-        'axes.titlesize': 10,          # Title size
-        'axes.labelsize': 7,           # Axis labels (xlabel/ylabel)
-        'legend.fontsize': 7,          # Legend text
-        'xtick.labelsize': 6,          # X-axis tick labels
-        'ytick.labelsize': 6,          # Y-axis tick labels
-        'lines.linewidth': 1.5,        # Line width for plots
-        'figure.dpi': 300,             # Figure resolution
-        'figure.figsize': (8, 6),      # Default figure size
-        'grid.linestyle': '--',        # Grid line style
-        'grid.linewidth': 0.5,         # Grid line width
-        'grid.alpha': 0.2,             # Grid transparency
-        'axes.spines.right': False,    # Hide right spine
-        'axes.spines.top': False,      # Hide top spine
-        'image.cmap': config['color_map'],        # Default colormap
-        'axes.edgecolor': 'black',                # Axis edge color
-        'axes.facecolor': 'none',                 # Transparent axes background
-        'text.usetex': False                # Ensure LaTeX is off
+
+
+def update_matploblib_config(config=None, font_family="Arial", layout="single"):
+    """
+    Configure matplotlib settings optimized for Nature journal figures:
+      - 7 pt fonts (labels, ticks, legend), 9 pt titles
+      - Thin spines (0.5 pt), ticks out (left/bottom only), no minor ticks
+      - No grid, clean minimalist look
+      - Colorblind-friendly Tableau 10 color cycle
+      - Illustrator-safe PDF export (Type 42)
+      - Figure sizes: "single" (~89 mm), "double" (~183 mm), or custom (width, height) in inches
+    
+    Args:
+        config (dict, optional): Configuration dict (e.g., {'color_map': 'RdYlBu'}).
+        font_family (str): Preferred font (e.g., 'Arial', falls back to 'Helvetica').
+        layout (str or tuple): 'single' (~89 mm), 'double' (~183 mm), or (width, height) in inches.
+    """
+    if config is None:
+        config = {}
+    # Fallback if chosen font missing
+    try:
+        from matplotlib.font_manager import findfont, FontProperties
+        findfont(FontProperties(family=font_family))
+    except Exception:
+        font_family = "Helvetica"  # Nature prefers Helvetica if Arial unavailable
+        print(f"Warning: '{font_family}' not found, falling back to 'Helvetica'.")
+    
+    # Figure size presets (Nature: single ≈ 89 mm, double ≈ 183 mm at 25.4 mm/inch)
+    if isinstance(layout, tuple):
+        fig_w, fig_h = layout
+    else:
+        if layout == "double":
+            fig_w = 7.2  # ~183 mm
+            fig_h = 5.4  # Adjusted aspect
+        else:  # "single"
+            fig_w = 4.0  # Increased from 3.5" for more space (~102 mm)
+            fig_h = 3.0  # Increased from 2.6" for better aspect (~76 mm)
+    # Colorblind-friendly cycle (Tableau 10 adapted)
+    cb_cycle = [
+        "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+        "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
+    ]
+    mpl.rcParams.update({
+        # --- Text & Fonts ---
+        "text.usetex": False,  # Avoid LaTeX
+        "font.family": [font_family],  # Explicit font
+        "mathtext.fontset": "dejavusans",  # Disable mathtext
+        "mathtext.default": "regular",  # Plain text
+        "axes.unicode_minus": True,  # Proper minus signs
+        # --- Sizes (7 pt baseline, adjusted for space) ---
+        "font.size": 7,  # Reduced from 8 pt
+        "axes.titlesize": 9,  # Reduced from 10 pt
+        "axes.labelsize": 7,
+        "legend.fontsize": 7,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        # --- Lines & Markers ---
+        "lines.linewidth": 1.5,  # Kept for data visibility
+        "lines.markersize": 4.0,
+        "patch.linewidth": 0.5,
+        "errorbar.capsize": 2,
+        # --- Axes, Spines, Ticks ---
+        "axes.linewidth": 0.5,
+        "axes.edgecolor": "black",
+        "axes.facecolor": "none",
+        "axes.titlepad": 3.0,
+        "axes.labelpad": 2.0,
+        "axes.prop_cycle": mpl.cycler(color=cb_cycle),
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "xtick.major.size": 2.5,
+        "ytick.major.size": 2.5,
+        "xtick.minor.visible": False,
+        "ytick.minor.visible": False,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.top": False,
+        "ytick.right": False,
+        # --- Grid ---
+        "axes.grid": False,
+        # --- Legend ---
+        "legend.frameon": False,
+        "legend.handlelength": 1.6,  # Slightly adjusted
+        "legend.handletextpad": 0.4,
+        "legend.borderaxespad": 0.3,
+        "legend.loc": "best",  # Dynamic placement to avoid overlap
+        # --- Figure & Save ---
+        "figure.dpi": 600,
+        "figure.figsize": (fig_w, fig_h),
+        "savefig.dpi": 600,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.1,  # Increased for spacing
+        "savefig.transparent": False,  # White background
+        # --- PDF/SVG Export ---
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "pdf.use14corefonts": False,
+        "svg.fonttype": "none",
     })
-    log.done("Matplotlib settings updated.")
 
 
 

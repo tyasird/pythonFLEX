@@ -1,6 +1,6 @@
 [project]
 name = "pythonflex"
-version = "0.1.5"
+version = "0.2"
 description = "pythonFLEX is a benchmarking toolkit for evaluating CRISPR screen results against biological gold standards. The toolkit computes gene-level and complex-level performance metrics, helping researchers systematically assess the biological relevance and resolution of their CRISPR screening data."
 readme = "README.md"
 authors = [

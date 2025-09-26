@@ -22,7 +22,6 @@ inputs = {
 
 
 #%%
-
 default_config = {
     "min_genes_in_complex": 0,
     "min_genes_per_complex_analysis": 3,
@@ -32,7 +31,7 @@ default_config = {
     "jaccard": True,
     "plotting": {
         "save_plot": True,
-        "output_type": "PNG",
+        "output_type": "pdf",
     },
     "preprocessing": {
         "fill_na": True,
@@ -48,7 +47,6 @@ default_config = {
 flex.initialize(default_config)
 
 # Load datasets and gold standard terms
-
 data, _ = flex.load_datasets(inputs)
 terms, genes_in_terms = flex.load_gold_standard()
 
@@ -59,6 +57,7 @@ for name, dataset in data.items():
     pra = flex.pra(name, dataset, is_corr=False)
     fpc = flex.pra_percomplex(name, dataset, is_corr=False) 
     cc = flex.complex_contributions(name)
+    
 
 
 #%%
