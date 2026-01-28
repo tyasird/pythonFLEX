@@ -28,4 +28,15 @@ mel_df.to_csv("melanoma.csv")
 liver_df.to_csv("liver.csv")
 neuro_df.to_csv("neuroblastoma.csv")
 df.to_csv("depmap_geneeffect_all_cellines.csv")
+
+
+# %%
+import pandas as pd
+df = pd.read_csv('../../../../_datasets/depmap/19Q2/Achilles_gene_effect.csv', index_col=0)
+df.columns = df.columns.str.split(" \\(").str[0]
+df = df.T
+
+# %%
+df.to_csv("../../../../_datasets/depmap/19Q2/gene_effect.csv") 
+
 # %%

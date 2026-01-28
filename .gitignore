@@ -15,3 +15,4 @@ bfg-*.jar
 examples/output/
 src/benchmarkcr/examples/output/
 .aider*
+.vscode

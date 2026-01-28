@@ -34,8 +34,6 @@ def deep_update(source, overrides):
             source[key] = value
     return source
 
-
-
 def initialize(config={}):
 
     default_config = {
@@ -45,6 +43,7 @@ def initialize(config={}):
         "gold_standard": "CORUM",
         "color_map": "RdYlBu",
         "jaccard": True,
+        "use_common_genes": True,
         "plotting": {
             "save_plot": True,
             "show_plot": True,
@@ -92,10 +91,6 @@ def initialize(config={}):
     log.progress(f"Output folder '{output_folder}' ensured to exist.")
     log.done("Initialization completed. ")
     tprint("FLEX",font="standard")
-
-
-
-
 
 def update_matploblib_config(config=None, font_family="Arial", layout="single"):
     """
@@ -195,28 +190,46 @@ def update_matploblib_config(config=None, font_family="Arial", layout="single"):
         "svg.fonttype": "none",
     })
 
-
-
-
-
 def pra(dataset_name, matrix, is_corr=False):
     log.info(f"******************** {dataset_name} ********************")
     log.started(f"** Global Precision-Recall Analysis - {dataset_name} **")
     config = dload("config")
+    use_common_genes = config.get("use_common_genes", True)
 
     terms_data = dload("common", "terms")
     if terms_data is None or not isinstance(terms_data, pd.DataFrame):
         raise ValueError("Expected 'terms' to be a DataFrame, but got None or invalid type.")
-    terms = terms_data
-    genes_present = dload("common", "genes_present_in_terms")
+    terms = terms_data.copy()
     sorting = dload("input", "sorting")
     sort_order = sorting.get(dataset_name, "high")
 
     if not is_corr:
         matrix = perform_corr(matrix, config.get("corr_function"))
-        
-    matrix = filter_matrix_by_genes(matrix, genes_present)
 
+    # Apply per-dataset gene filtering based on use_common_genes setting
+    if use_common_genes:
+        # Use common genes approach (current behavior)
+        common_genes = dload("common", "common_genes")
+        if not common_genes:
+            raise ValueError("Common genes not found.")
+        common_genes_set = set(common_genes)
+        terms["used_genes"] = terms["all_genes"].apply(lambda x: list(set(x) & common_genes_set))
+        log.info(f"Using common genes approach: {len(common_genes)} genes")
+    else:
+        # Use per-dataset approach (new behavior)
+        dataset_genes_set = set(matrix.index)
+        terms["used_genes"] = terms["all_genes"].apply(lambda x: list(set(x) & dataset_genes_set))
+        log.info(f"Using per-dataset approach for {dataset_name}: {len(dataset_genes_set)} genes in dataset")
+
+    # Filter terms by minimum genes after dataset-specific filtering
+    terms["n_used_genes"] = terms["used_genes"].apply(len)
+    terms = terms[terms["n_used_genes"] >= config['min_genes_in_complex']]
+    
+    # Get genes present in terms for this specific dataset
+    genes_present = list(set([gene for genes_list in terms["used_genes"] for gene in genes_list]))
+    log.info(f"Genes present in terms for {dataset_name}: {len(genes_present)}")
+    
+    matrix = filter_matrix_by_genes(matrix, genes_present)
     log.info(f"Matrix shape: {matrix.shape}")
     df = binary(matrix)
     log.info(f"Pair-wise shape: {df.shape}")
@@ -252,11 +265,12 @@ def pra(dataset_name, matrix, is_corr=False):
     dsave(pr_auc, "pr_auc", dataset_name)
     dsave( _corrected_auc(df) , "corrected_pr_auc", dataset_name)
 
+    # Save dataset-specific terms for per-complex analysis
+    dsave(terms, "common", f"terms_{dataset_name}")
+    dsave(genes_present, "common", f"genes_present_in_terms_{dataset_name}")
+
     log.done(f"Global PRA completed for {dataset_name}")
     return df
-
-
-
 
 # --------------------------------------------------------------------------
 # helper functions for PRA per-complex analysis
@@ -275,7 +289,6 @@ def _build_gene_to_pair_indices(pairwise_df):
         gene_to_pair_indices[gene] = group.values.tolist() 
     return gene_to_pair_indices
 
-
 def _build_gold_pair_to_complex(terms):
     pair_map = defaultdict(set)
     for comp_id, genes in zip(terms.index, terms['used_genes']):
@@ -286,7 +299,6 @@ def _build_gold_pair_to_complex(terms):
                 g1, g2 = sorted([genes[i], genes[j]])
                 pair_map[(g1, g2)].add(comp_id)
     return pair_map
-
 
 def _precompute_complex_ids(pairwise_df, gold_pair_to_complex):
     if not gold_pair_to_complex:
@@ -304,17 +316,12 @@ def _precompute_complex_ids(pairwise_df, gold_pair_to_complex):
     ]
     return pairwise_df
 
-
-
 def _dump_pairwise_memmap(df: pd.DataFrame, tag: str) -> Path:
     tmp_dir = Path(os.path.join(".tmp", "mmap"))  # Use .tmp/mmap/ for organization
     tmp_dir.mkdir(parents=True, exist_ok=True)  # Create if it doesn't exist
     path = tmp_dir / f".pairwise_{_sanitize(tag)}.pkl"          
     dump(df, path, compress=0)  
     return path 
-
-
-
 
 # Global variables for worker processes (compatible with older joblib)
 PAIRWISE_DF = None
@@ -326,8 +333,6 @@ def _init_worker_globals(memmap_path, gene_to_pair_indices):
     PAIRWISE_DF = load(memmap_path)        
     GENE2IDX = gene_to_pair_indices
 
-
-
 def delete_memmap(memmap_path, log, wait_seconds=0.1):
 
     gc.collect()
@@ -338,8 +343,6 @@ def delete_memmap(memmap_path, log, wait_seconds=0.1):
         log.info(f"Cleaned up temporary memmap file: {memmap_path}")
     except OSError as e:
         log.warning(f"Original error: {e}")
-
-
 
 # --------------------------------------------------------------------------
 # Process each chunk of terms
@@ -391,15 +394,21 @@ def _process_chunk(chunk_terms, min_genes, memmap_path, gene_to_pair_indices):
         # Return error info for debugging
         return {'error': str(e), 'chunk_size': len(chunk_terms)}
 
-
-
 def pra_percomplex(dataset_name, matrix, is_corr=False, chunk_size=200):
     log.started(f"*** Per-complex PRA started - {dataset_name} ***")
     config = dload("config")
-    terms = dload("common", "terms")
-    genes_present = dload("common", "genes_present_in_terms")
+    
+    # Use dataset-specific terms and genes from pra function
+    terms = dload("common", f"terms_{dataset_name}")
+    genes_present = dload("common", f"genes_present_in_terms_{dataset_name}")
+    
+    if terms is None:
+        log.warning(f"No dataset-specific terms found for {dataset_name}, using global terms")
+        terms = dload("common", "terms")
+        genes_present = dload("common", "genes_present_in_terms")
+    
     sorting = dload("input", "sorting")
-    sort_order = sorting.get(dataset_name, "highdor")
+    sort_order = sorting.get(dataset_name, "high")
     if not is_corr:
         matrix = perform_corr(matrix, config.get("corr_function"))
     matrix = filter_matrix_by_genes(matrix, genes_present)
@@ -494,14 +503,9 @@ def pra_percomplex(dataset_name, matrix, is_corr=False, chunk_size=200):
     # Add the computed AUC scores to the terms DataFrame.
     terms["auc_score"] = pd.Series(auc_scores)
     terms["corrected_auc_score"] = pd.Series(corrected_auc_scores)
-    terms.drop(columns=["hash"], inplace=True)
     dsave(terms, "pra_percomplex", dataset_name)
     log.done(f"Per-complex PRA completed.")
     return terms
-
-
-
-
 
 def complex_contributions(name):
     log.info(f"Computing complex contributions (Greedy) for dataset: {name}")
@@ -678,41 +682,56 @@ def complex_contributions(name):
     log.info(f"Complex contribution (Greedy) completed for dataset: {name}")
     return r
 
-
-
-
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 
 def perform_corr(df, corr_func):
-    if corr_func not in {"numpy", "pandas","numba"}:
+    if corr_func not in {"numpy", "numpy_without_mask","pandas","numba"}:
         raise ValueError("corr_func must be 'numpy' or 'pandas'")
 
     log.started(f"Performing correlation using '{corr_func}' method.")
     
+    x_axis, y_axis = df.shape
+    log.info(f"Data shape: {x_axis} features, {y_axis} samples")
+
     if corr_func == "numpy":
         M    = np.ma.masked_invalid(df.values)
         corr = np.ma.corrcoef(M)
         arr  = corr.filled(np.nan)
         df_corr = pd.DataFrame(arr, index=df.index, columns=df.index)
         np.fill_diagonal(df_corr.values, np.nan)
+        # check shape is x_axis x x_axis
+        if df_corr.shape != (x_axis, x_axis):
+            raise ValueError(f"Correlation matrix shape mismatch: expected ({x_axis}, {x_axis}), got {df_corr.shape}")
         log.done("Correlation.")
         return df_corr
+    
+    elif corr_func == "numpy_without_mask":
+        corr = np.corrcoef(df.values)
+        df_corr = pd.DataFrame(corr, index=df.index, columns=df.index)
+        np.fill_diagonal(df_corr.values, np.nan)
+        if df_corr.shape != (x_axis, x_axis):
+            raise ValueError(f"Correlation matrix shape mismatch: expected ({x_axis}, {x_axis}), got {df_corr.shape}")
+        log.done("Correlation.")
+        return df_corr
+    
     
     elif corr_func == "numba":
         corr = fast_corr(df)
         np.fill_diagonal(corr.values, np.nan)
+        if corr.shape != (x_axis, x_axis):
+            raise ValueError(f"Correlation matrix shape mismatch: expected ({x_axis}, {x_axis}), got {corr.shape}")
         log.done("Correlation using Numba.")
-        return corr
+        return corr   
     
     else:
         # Compute correlations and modify diagonal in-place
         corr = df.T.corr()
         np.fill_diagonal(corr.values, np.nan)
+        if corr.shape != (x_axis, x_axis):
+            raise ValueError(f"Correlation matrix shape mismatch: expected ({x_axis}, {x_axis}), got {corr.shape}")
         return corr
-
-
 
 def fast_corr(df):
     @njit(parallel=True)
@@ -779,11 +798,8 @@ def fast_corr(df):
     corr_df = pd.DataFrame(corr_matrix, index=df_numeric.index, columns=df_numeric.index)
     return corr_df
 
-
-
 def is_symmetric(df):
     return np.allclose(df, df.T, equal_nan=True)
-
 
 def binary(corr):
     log.started("Converting correlation matrix to pair-wise format.")
@@ -798,12 +814,10 @@ def binary(corr):
     log.done("Pair-wise conversion.")
     return stack
 
-
 def has_mirror_of_first_pair(df):
     g1, g2 = df.iloc[0]['gene1'], df.iloc[0]['gene2']
     mirror_exists = ((df['gene1'] == g2) & (df['gene2'] == g1)).iloc[1:].any()
     return mirror_exists
-
 
 def convert_full_to_half_matrix(df):
     if not is_symmetric(df):
@@ -815,7 +829,6 @@ def convert_full_to_half_matrix(df):
     log.done("Matrix conversion.")
     return pd.DataFrame(arr, index=df.index, columns=df.columns)
 
-
 def drop_mirror_pairs(df):
     log.started("Dropping mirror pairs to ensure unique gene pairs (Optimized).")
     gene_pairs = np.sort(df[["gene1", "gene2"]].to_numpy(), axis=1)
@@ -824,16 +837,12 @@ def drop_mirror_pairs(df):
     log.done("Mirror pairs are dropped.")
     return df
 
-
 def quick_sort(df, ascending=False):
     log.started(f"Pair-wise matrix is sorting based on the 'score' column: ascending:{ascending}")
     order = 1 if ascending else -1
     sorted_df = df.iloc[np.argsort(order * df["score"].values)].reset_index(drop=True)
     log.done("Pair-wise matrix sorting.")
     return sorted_df
-
-
-
 
 def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_percomplex"]):
 
@@ -880,13 +889,555 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 
     log.done("Results saved to CSV files in the output folder.")
 
+################### mPR
+################### mPR ###################
 
 
+
+################### mPR ###################
+################### mPR ###################
+
+# -----------------------------------------------------------------------------
+# mPR preparation (module-level precision–recall, Fig. 1E / 1F)
+# -----------------------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+
+def _mpr_get_mtRibo_ETCI_ids(terms_like):
+    """
+    Identify mitochondrial ribosome and ETC I complexes to remove.
+
+    Rule (matching the FLEX paper):
+      - Name contains 'Respiratory chain complex I (holoenzyme)'
+      - OR Name contains '55S'
+    """
+    if "Name" not in terms_like.columns:
+        raise KeyError("mpr_prepare(): expected a 'Name' column in the CORUM terms.")
+
+    name = terms_like["Name"].astype(str)
+    mask = name.str.contains(
+        "Respiratory chain complex I \\(holoenzyme\\)", case=False, regex=True
+    ) | name.str.contains("55S", case=False, regex=False)
+
+    return set(terms_like.index[mask])
+
+
+def _mpr_get_small_high_auprc_ids(
+    pra_percomplex, size_th=30, auprc_th=0.4, use_corrected=True
+):
+    """
+    Identify complexes that are small and have high per-complex AUPRC.
+
+    Small: full CORUM size (Length) < size_th
+    High AUPRC: per-complex AUPRC >= auprc_th
+    """
+    if "Length" not in pra_percomplex.columns:
+        raise KeyError(
+            "mpr_prepare(): expected a 'Length' column in the per-complex table."
+        )
+
+    if use_corrected and "corrected_auc_score" in pra_percomplex.columns:
+        score_col = "corrected_auc_score"
+    elif "auc_score" in pra_percomplex.columns:
+        score_col = "auc_score"
+    else:
+        raise KeyError(
+            "mpr_prepare(): expected 'corrected_auc_score' or 'auc_score' in the per-complex table."
+        )
+
+    size_mask = pra_percomplex["Length"] < size_th
+    score_mask = pra_percomplex[score_col] >= auprc_th
+
+    mask = size_mask & score_mask
+    return set(pra_percomplex.index[mask])
+
+
+# -------------------------------------------------------------------------
+# Helpers implementing the FLEX stepwise module-level PR logic
+# -------------------------------------------------------------------------
+
+"""
+CORRECT FIX for _mpr_build_pairs in analysis.py
+
+The issue: The current code marks filtered TPs as true=0, which makes them
+count as False Positives and dramatically lowers precision.
+
+The R code (getSubsetOfCoAnnRemoveIDs with replace=FALSE) REMOVES the 
+filtered positive pairs entirely from the dataset.
+
+This is the key difference:
+- Current Python: Keeps all rows, filtered TPs become FPs → precision tanks
+- R code: Removes filtered TP rows → they don't affect precision at all
+"""
+
+import numpy as np
+import pandas as pd
+
+
+def _mpr_build_pairs(pra, removed_ids=None):
+    """
+    Build a Pairs.in.data-like table for mPR / stepwise contributions.
+    
+    FIXED: Removes rows that contain filtered complex IDs (matching R behavior)
+    instead of marking them as true=0.
+
+    Input:
+      pra : DataFrame with at least columns
+            - 'score'       : ranking score (higher = better)
+            - 'complex_id'  : complex annotations
+      removed_ids : set[int] of complexes to remove
+
+    Output:
+      DataFrame with columns:
+        - predicted   : score
+        - true        : 0/1
+        - complex_ids : list[int] per row
+    """
+    if "complex_id" not in pra.columns and "complex_ids" not in pra.columns:
+        raise RuntimeError(
+            "mpr_prepare(): expected a 'complex_id' or 'complex_ids' column in 'pra'."
+        )
+
+    removed_ids = set(int(x) for x in (removed_ids or []))
+
+    df = pra.copy()
+
+    # Normalize complex-ID column name
+    if "complex_id" in df.columns:
+        cid_col = "complex_id"
+    else:
+        cid_col = "complex_ids"
+
+    if "score" not in df.columns:
+        raise RuntimeError("mpr_prepare(): expected a 'score' column in 'pra'.")
+
+    def normalize_ids(cell):
+        """Parse complex IDs from various formats."""
+        if isinstance(cell, (list, tuple, np.ndarray, pd.Series)):
+            return [int(x) for x in cell if pd.notnull(x)]
+        elif isinstance(cell, str):
+            if not cell:
+                return []
+            parts = [p for p in cell.split(";") if p]
+            return [int(float(p)) for p in parts]
+        elif pd.isna(cell):
+            return []
+        else:
+            try:
+                return [int(cell)]
+            except Exception:
+                return []
+
+    def should_remove(cell):
+        """Check if this row should be removed (contains any removed_id AND is a TP)."""
+        ids = normalize_ids(cell)
+        if not ids:
+            return False  # Not a TP, keep it
+        # Remove if ANY of the IDs is in removed_ids
+        return any(cid in removed_ids for cid in ids)
+
+    # Build output DataFrame
+    out = pd.DataFrame(index=df.index)
+    out["predicted"] = df["score"].astype(float)
+    out["complex_ids"] = df[cid_col].apply(normalize_ids)
+    out["true"] = out["complex_ids"].apply(lambda ids: 1 if len(ids) > 0 else 0)
+    
+    # KEY FIX: Remove rows that are TPs AND contain a removed complex ID
+    # This matches the R behavior of getSubsetOfCoAnnRemoveIDs with replace=FALSE
+    if removed_ids:
+        should_remove_mask = df[cid_col].apply(should_remove)
+        # Only remove if it's a TP (true=1)
+        remove_mask = should_remove_mask & (out["true"] == 1)
+        out = out[~remove_mask].copy()
+    
+    # Also filter the complex_ids to remove the removed IDs (for stepwise contributions)
+    if removed_ids:
+        out["complex_ids"] = out["complex_ids"].apply(
+            lambda ids: [cid for cid in ids if cid not in removed_ids]
+        )
+
+    # Sort by predicted descending
+    out = out.sort_values("predicted", ascending=False).reset_index(drop=True)
+    return out
+
+
+# ============================================================================
+# HOW TO APPLY THIS FIX
+# ============================================================================
+# 
+# In analysis.py, replace the _mpr_build_pairs function (around line 962-1025)
+# with the _mpr_build_pairs_fixed function above.
+#
+# The key changes are:
+#
+# 1. REMOVE rows instead of marking true=0:
+#    
+#    OLD CODE:
+#        if removed_ids:
+#            ids = [cid for cid in ids if cid not in removed_ids]
+#        return ids
+#        ...
+#        out["true"] = out["complex_ids"].apply(lambda ids: 1 if len(ids) > 0 else 0)
+#    
+#    NEW CODE:
+#        # First compute true normally
+#        out["true"] = out["complex_ids"].apply(lambda ids: 1 if len(ids) > 0 else 0)
+#        
+#        # Then REMOVE rows that are TPs and contain removed IDs
+#        if removed_ids:
+#            should_remove_mask = df[cid_col].apply(should_remove)
+#            remove_mask = should_remove_mask & (out["true"] == 1)
+#            out = out[~remove_mask].copy()
+#
+# ============================================================================
+
+def _mpr_precision_cutoffs_from_pairs(pairs, step=0.025):
+    """
+    Choose precision cutoffs similar to FLEX:
+      - start at min positive precision
+      - add grid 0.10, 0.125, 0.15, ... up to max precision
+    """
+    true = pairs["true"].to_numpy(dtype=int)
+    n = len(true)
+    if n == 0 or true.sum() == 0:
+        return np.array([1.0], dtype=float)
+
+    tp_cum = true.cumsum()
+    denom = np.arange(n, dtype=float) + 1.0
+    precision = tp_cum / denom
+
+    pos_prec = precision[true == 1]
+    min_p = float(pos_prec.min())
+    max_p = float(precision.max())
+
+    cuts = [round(min_p, 3)]
+
+    v = 0.10
+    while v <= max_p + 1e-9:
+        if v > min_p:
+            cuts.append(round(v, 3))
+        v += step
+
+    cuts = sorted(set(cuts))
+    return np.array(cuts, dtype=float)
+
+
+def _mpr_stepwise_contributions(pairs, precision_cutoffs):
+    """
+    Greedy, stepwise TP allocation per complex at each precision cutoff.
+
+    Input:
+      pairs : DataFrame with columns
+              - predicted (float)
+              - true (0/1)
+              - complex_ids : list[int]
+      precision_cutoffs : 1D array of precision thresholds
+
+    Output:
+      contrib_df : DataFrame [complex_id x cutoff] with TP counts
+    """
+    pairs = pairs.copy()
+    pairs = pairs.sort_values("predicted", ascending=False).reset_index(drop=True)
+
+    true = pairs["true"].to_numpy(dtype=int)
+    n = len(true)
+    if n == 0 or true.sum() == 0:
+        return pd.DataFrame()
+
+    tp_cum = true.cumsum()
+    denom = np.arange(n, dtype=float) + 1.0
+    precision = tp_cum / denom
+
+    complex_lists = []
+    for cell in pairs["complex_ids"].tolist():
+        if isinstance(cell, (list, tuple, np.ndarray, pd.Series)):
+            complex_lists.append([int(x) for x in cell if pd.notnull(x)])
+        elif pd.isna(cell):
+            complex_lists.append([])
+        else:
+            try:
+                complex_lists.append([int(cell)])
+            except Exception:
+                complex_lists.append([])
+
+    all_cids = sorted({cid for cids in complex_lists for cid in cids})
+    if not all_cids:
+        return pd.DataFrame()
+
+    cid_to_idx = {cid: i for i, cid in enumerate(all_cids)}
+    n_cids = len(all_cids)
+    n_cut = len(precision_cutoffs)
+
+    contrib = np.zeros((n_cids, n_cut), dtype=float)
+
+    pos_prec = precision[true == 1]
+    prec_min = float(pos_prec.min())
+    prec_max = float(precision.max())
+
+    for j, cutoff in enumerate(precision_cutoffs):
+        if cutoff < prec_min or cutoff > prec_max:
+            continue
+
+        cand_mask = precision >= cutoff
+        if not np.any(cand_mask & (true == 1)):
+            continue
+
+        k = np.where(cand_mask)[0][-1]
+        tp_target = tp_cum[k]
+        i_end = np.where(tp_cum == tp_target)[0][0]
+
+        rows = np.arange(i_end + 1, dtype=int)
+        tp_rows = rows[true[rows] == 1]
+        if tp_rows.size == 0:
+            continue
+
+        cid_to_rows = {}
+        for r in tp_rows:
+            for cid in complex_lists[r]:
+                cid_to_rows.setdefault(cid, set()).add(r)
+
+        covered = set()
+
+        while True:
+            best_cid = None
+            best_size = 0
+            for cid, rset in cid_to_rows.items():
+                size = len(rset - covered)
+                if size > best_size:
+                    best_size = size
+                    best_cid = cid
+
+            if best_cid is None or best_size == 0:
+                break
+
+            new_rows = cid_to_rows[best_cid] - covered
+            covered.update(new_rows)
+            row_idx = cid_to_idx[best_cid]
+            contrib[row_idx, j] = float(len(new_rows))
+
+    contrib_df = pd.DataFrame(
+        contrib,
+        index=pd.Index(all_cids, name="complex_id"),
+        columns=precision_cutoffs,
+    )
+    return contrib_df
+
+
+
+
+
+
+
+
+def _mpr_module_coverage(contrib_df, terms, tp_th=1, percent_th=0.1):
+    """
+    Convert stepwise contribution matrix to "#covered complexes" per cutoff.
+
+    contrib_df : rows = complex_id (int), columns = precision_cutoffs (float)
+    terms      : CORUM 'terms' table (index = complex_id)
+    
+    A complex is covered at a precision cutoff if:
+    1. It contributes at least tp_th TP pairs (stepwise)
+    2. The fraction of contributed pairs vs total possible pairs > percent_th
+       (matches R behavior: x > percent_th)
+    """
+    if contrib_df.empty:
+        return np.zeros(0, dtype=float)
+
+    precision_cutoffs = np.asarray(contrib_df.columns, dtype=float)
+    data = contrib_df.to_numpy(dtype=float)
+    n_cut = data.shape[1]
+
+    n_pairs = np.zeros(data.shape[0], dtype=float)
+    for i, cid in enumerate(contrib_df.index):
+        cid_int = int(cid)
+        if cid_int not in terms.index:
+            n_pairs[i] = 0.0
+            continue
+        row = terms.loc[cid_int]
+
+        n_genes = None
+        
+        # FIXED: Handle all_genes as list (how it's stored in preprocessing)
+        if "all_genes" in row.index:
+            genes = row["all_genes"]
+            if isinstance(genes, list):
+                n_genes = len(genes)
+            elif isinstance(genes, str):
+                # Fallback if stored as string
+                n_genes = len([g for g in genes.split(";") if g])
+        
+        # Fallback to Genes column (original string from CORUM)
+        if n_genes is None and "Genes" in row.index:
+            genes_str = row["Genes"]
+            if isinstance(genes_str, str):
+                n_genes = len([g for g in genes_str.split(";") if g])
+        
+        # Fallback to n_all_genes (computed during preprocessing)
+        if n_genes is None and "n_all_genes" in row.index:
+            try:
+                n_genes = int(row["n_all_genes"])
+            except (ValueError, TypeError):
+                n_genes = None
+        
+        # Fallback to Length column (from original CORUM file)
+        if n_genes is None and "Length" in row.index:
+            try:
+                n_genes = int(row["Length"])
+            except (ValueError, TypeError):
+                n_genes = None
+
+        if n_genes is None or n_genes < 2:
+            n_pairs[i] = 0.0
+        else:
+            n_pairs[i] = n_genes * (n_genes - 1) / 2.0
+
+    coverage = np.zeros(n_cut, dtype=float)
+
+    for j in range(n_cut):
+        tps = data[:, j]
+        mask = (tps >= tp_th) & (n_pairs > 0)
+        if not np.any(mask):
+            coverage[j] = 0.0
+            continue
+
+        frac = np.zeros_like(tps)
+        frac[mask] = tps[mask] / n_pairs[mask]
+        # Note: Using > (strict inequality) to match R code behavior
+        covered = (tps >= tp_th) & (frac > percent_th)
+        coverage[j] = float(covered.sum())
+
+    return coverage
+
+
+
+
+
+
+
+
+
+
+def mpr_prepare(
+    name,
+    size_th=30,
+    auprc_th=0.4,
+    tp_th=1,
+    percent_th=0.1,
+    use_corrected=True,
+):
+    """
+    Prepare data for Fig. 1E (TP vs precision) and Fig. 1F (mPR) for dataset `name`.
+
+    Stores an 'mpr' object with:
+      - precision_cutoffs
+      - tp_curves[label]         : full PR (TP vs precision) per filter
+      - coverage_curves[label]   : #covered complexes per cutoff per filter
+      - filters metadata
+    """
+    pra = dload("pra", name)
+    pra_percomplex = dload("pra_percomplex", name)
+    terms = dload("common", "terms")
+
+    if pra is None:
+        raise RuntimeError(
+            f"mpr_prepare(): PRA data for dataset '{name}' not found "
+            "(dload('pra', name))."
+        )
+    if pra_percomplex is None:
+        raise RuntimeError(
+            f"mpr_prepare(): per-complex PRA data for dataset '{name}' not found "
+            "(dload('pra_percomplex', name))."
+        )
+    if terms is None:
+        raise RuntimeError(
+            "mpr_prepare(): CORUM 'terms' table not found (dload('common', 'terms'))."
+        )
+
+    # sort by score descending (ranking)
+    if "score" in pra.columns:
+        pra = pra.sort_values("score", ascending=False).reset_index(drop=True)
+    else:
+        pra = pra.reset_index(drop=True)
+
+    # filters
+    mtRibo_ids = _mpr_get_mtRibo_ETCI_ids(pra_percomplex)
+    small_hi_ids = _mpr_get_small_high_auprc_ids(
+        pra_percomplex,
+        size_th=size_th,
+        auprc_th=auprc_th,
+        use_corrected=use_corrected,
+    )
+
+    filter_sets = {
+        "all": set(),
+        "no_mtRibo_ETCI": set(mtRibo_ids),
+        "no_small_highAUPRC": set(small_hi_ids),
+    }
+
+    tp_curves = {}
+    coverage_curves = {}
+    precision_cutoffs = None
+
+    for label, removed in filter_sets.items():
+        # 1) Build pairs table after removing complexes in `removed`
+        pairs = _mpr_build_pairs(pra, removed_ids=removed)
+
+        true = pairs["true"].to_numpy(dtype=int)
+        n = len(true)
+        if n == 0 or true.sum() == 0:
+            tp_curves[label] = {
+                "tp": np.array([], dtype=float),
+                "precision": np.array([], dtype=float),
+            }
+            coverage_curves[label] = np.zeros(0, dtype=float)
+            continue
+
+        tp_cum = true.cumsum()
+        denom = np.arange(n, dtype=float) + 1.0
+        precision = tp_cum / denom
+
+        # full PR: only positions where we add a TP
+        mask_tp = true == 1
+        tp_full = tp_cum[mask_tp]
+        prec_full = precision[mask_tp]
+        tp_curves[label] = {"tp": tp_full, "precision": prec_full}
+
+        # common precision grid from 'all'
+        if precision_cutoffs is None:
+            precision_cutoffs = _mpr_precision_cutoffs_from_pairs(pairs)
+
+        contrib_df = _mpr_stepwise_contributions(pairs, precision_cutoffs)
+        cov = _mpr_module_coverage(
+            contrib_df,
+            terms,
+            tp_th=tp_th,
+            percent_th=percent_th,
+        )
+        coverage_curves[label] = cov
+
+    mpr_data = {
+        "precision_cutoffs": precision_cutoffs,
+        "tp_curves": tp_curves,
+        "coverage_curves": coverage_curves,
+        "filters": {
+            "no_mtRibo_ETCI": sorted(mtRibo_ids),
+            "no_small_highAUPRC": sorted(small_hi_ids),
+            "size_th": size_th,
+            "auprc_th": auprc_th,
+            "percent_th": percent_th,
+            "tp_th": tp_th,
+            "use_corrected": bool(use_corrected),
+        },
+    }
+
+    dsave(mpr_data, "mpr", name)
 
 
 
 ### OLD FUNCTIONS
-
 
 # new but withoutparallel
 
@@ -986,8 +1537,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     log.done(f"Per-complex PRA completed.")
 #     return terms
 
-
-
 # it works quick but only maps 1 complex to each pair
 
 # def pra_percomplex_old_type_filtering(dataset_name, matrix, is_corr=False):
@@ -1050,8 +1599,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     log.done(f"Per-complex PRA completed.")
 #     return terms
 
-
-
 # OLD
 # def pra_percomplex(dataset_name, matrix, is_corr=False):
 #     log.started(f"*** Per-complex PRA started for {dataset_name} ***")
@@ -1103,13 +1650,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     log.done(f"Per-complex PRA completed.")
 #     return terms
 
-
-
-
-
-
-
-
 # without greedy
 # def complex_contributions(name):
 #     log.info(f"Computing complex contributions for dataset: {name}")
@@ -1134,11 +1674,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     dsave(r, "complex_contributions", name)
 #     log.info(f"Complex contributions computation completed for dataset: {name}")
 #     return r
-
-
-
-
-
 
 # # new
 # def complex_contributions(name):
@@ -1213,8 +1748,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     log.info(f"Greedy R-style complex contribution completed for dataset: {name}")
 #     return r
 
-
-
 # def pra(dataset_name, matrix, is_corr=False):
 #     log.info(f"******************** {dataset_name} ********************")
 #     log.started(f"** Global Precision-Recall Analysis - {dataset_name} **")
@@ -1247,7 +1780,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #             for g2 in genes[i + 1:]:
 #                 pair = tuple(sorted((g1, g2)))
 #                 gold_pair_to_complex[pair].append(idx)
-
 
 #     # Label predictions and complex IDs
 #     complex_ids = []
@@ -1283,8 +1815,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     log.done(f"Global PRA completed for {dataset_name}")
 #     return df, pr_auc
 
-
-
 # def compute_pra(df):
 #     log.info("Calculating precision-recall and AUC score.")
 #     if df.empty:
@@ -1296,7 +1826,6 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     df["recall"] = df["tp"] / df["tp"].iloc[-1]
 #     log.info("DONE: Calculating precision-recall AUC score.")
 #     return df
-
 
 # def pra(dataset_name, matrix, is_corr=False):
 #     log.info(f"PRA computation started for {dataset_name}.")
@@ -1326,71 +1855,3 @@ def save_results_to_csv(categories = ["complex_contributions", "pr_auc", "pra_pe
 #     dsave(pr_auc, "pr_auc", dataset_name)
 #     log.info(f"PRA computation completed for {dataset_name} (Sorting: {sort_order}).")
 #     return pra, pr_auc
-
-
-
-
-# new but not seperated to functions (Build gold standard etc.)
-
-# def pra(dataset_name, matrix, is_corr=False):
-#     log.info(f"******************** {dataset_name} ********************")
-#     log.started(f"** Global Precision-Recall Analysis - {dataset_name} **")
-#     terms_data = dload("tmp", "terms")
-#     if terms_data is None or not isinstance(terms_data, pd.DataFrame):
-#         raise ValueError("Expected 'terms' to be a DataFrame, but got None or invalid type.")
-#     terms = terms_data.reset_index(drop=True)
-#     genes_present = dload("tmp", "genes_present_in_terms")
-#     sorting = dload("input", "sorting")
-#     sort_order = sorting.get(dataset_name, "high")
-
-#     if not is_corr:
-#         matrix = perform_corr(matrix, "numpy")
-        
-#     matrix = filter_matrix_by_genes(matrix, genes_present)
-
-#     log.info(f"Matrix shape: {matrix.shape}")
-#     df = binary(matrix)
-#     log.info(f"Pair-wise shape: {df.shape}")
-#     df = quick_sort(df, ascending=(sort_order == "low"))
-#     df = df.reset_index(drop=True)
-
-#     # Build gold standard: map pair → complex ID
-#     gold_pair_to_complex = {}
-#     for idx, row in terms.iterrows():
-#         genes = row.used_genes
-#         if len(genes) < 2:
-#             continue
-#         for i, g1 in enumerate(genes):
-#             for g2 in genes[i + 1:]:
-#                 pair = tuple(sorted((g1, g2)))
-#                 gold_pair_to_complex[pair] = idx
-
-#     # Label predictions and complex IDs
-#     complex_ids = []
-#     predictions = []
-#     for g1, g2 in zip(df["gene1"], df["gene2"]):
-#         pair = tuple(sorted((g1, g2)))
-#         if pair in gold_pair_to_complex:
-#             predictions.append(1)
-#             complex_ids.append(gold_pair_to_complex[pair])
-#         else:
-#             predictions.append(0)
-#             complex_ids.append(0)
-#     df["prediction"] = predictions
-#     df["complex_id"] = complex_ids
-#     if df["prediction"].sum() == 0:
-#         log.info("No true positives found in dataset.")
-#         pr_auc = np.nan
-#     else:
-#         tp = df["prediction"].cumsum()
-#         df["tp"] = tp
-#         precision = tp / (np.arange(len(df)) + 1)
-#         recall = tp / tp.iloc[-1]
-#         pr_auc = metrics.auc(recall, precision)
-#         df["precision"] = precision
-#         df["recall"] = recall
-#     log.info(f"PR-AUC: {pr_auc:.4f}, Number of true positives: {df['prediction'].sum()}")
-#     dsave(df, "pra", dataset_name)
-#     dsave(pr_auc, "pr_auc", dataset_name)
-#     log.done(f"Global PRA completed for {dataset_name}")
-#     return df, pr_auc

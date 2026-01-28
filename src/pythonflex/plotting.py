@@ -1,6 +1,7 @@
 # Standard library
 from itertools import combinations
 from pathlib import Path
+import re
 
 # Third-party libraries
 import numpy as np
@@ -16,7 +17,6 @@ import matplotlib.font_manager as fm
 
 # Disable LaTeX rendering completely
 mpl.rcParams['text.usetex'] = False
-
 
 # Reset all font-related parameters to system defaults
 mpl.rcParams['font.family'] = 'sans-serif'
@@ -36,21 +36,34 @@ try:
 except:
     pass
 
-
 # Local modules
-from .utils import dload  
+from .utils import dload, _sanitize
 from .logging_config import log
-
-
-
-
 
 def plot_precision_recall_curve(line_width=2.0, hide_minor_ticks=True):
     pra = dload("pra")
     config = dload("config")
     plot_config = config["plotting"]
+    input_colors = dload("input", "colors")  # Load individual color overrides
+    
+    # Sanitize color keys to match dataset keys
+    if input_colors:
+        input_colors = {_sanitize(k): v for k, v in input_colors.items()}
 
-    fig, ax = plt.subplots()
+    # Get color map from config, default to "tab10" if not found
+    cmap_name = config.get("color_map", "tab10")
+    try:
+        cmap = get_cmap(cmap_name)
+    except ValueError:
+        log.warning(f"Color map '{cmap_name}' not found. Falling back to 'tab10'.")
+        cmap = get_cmap("tab10")
+
+    # Increase figure width to accommodate external legend without squashing axes
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # Adjust layout to make room for legend on the right
+    plt.subplots_adjust(right=0.7)
+    
     ax.set_xscale("log")
 
     # optionally hide minor ticks on the log axis
@@ -58,22 +71,33 @@ def plot_precision_recall_curve(line_width=2.0, hide_minor_ticks=True):
         ax.xaxis.set_minor_locator(NullLocator())
         ax.xaxis.set_minor_formatter(NullFormatter())
 
-    cmap = get_cmap()
-    num_colors = len(pra) if isinstance(pra, dict) else 1
-    colors = [cmap(float(i) / max(num_colors - 1, 1)) for i in range(num_colors)]
-
     if isinstance(pra, dict):
-        for (key, val), color in zip(pra.items(), colors):
+        # Determine colors for each dataset
+        dataset_names = list(pra.keys())
+        num_datasets = len(dataset_names)
+        
+        # Generate default colors from colormap
+        if num_datasets <= 10 and cmap_name == "tab10":
+             default_colors = [cmap(i) for i in range(num_datasets)]
+        else:
+             default_colors = [cmap(float(i) / max(num_datasets - 1, 1)) for i in range(num_datasets)]
+
+        for i, (key, val) in enumerate(pra.items()):
+            # Use override color if available, otherwise use default from cmap
+            color = input_colors.get(key) if input_colors else None
+            if color is None:
+                color = default_colors[i]
+            
             val = val[val.tp > 10]
             ax.plot(val.tp, val.precision, c=color, label=key, linewidth=line_width, alpha=0.9)
     else:
         pra = pra[pra.tp > 10]
         ax.plot(pra.tp, pra.precision, c="black", label="Precision Recall Curve", linewidth=line_width, alpha=0.9)
 
-    ax.set(title="Precision-Recall Performance of Datasets",
+    ax.set(title="",
            xlabel="Number of True Positives (TP)",
            ylabel="Precision")
-    ax.legend(loc="upper right", frameon=False)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.05, 1), frameon=False)
     ax.set_ylim(0, 1)
 
     # Nature style: no grid, open top/right spines
@@ -90,9 +114,172 @@ def plot_precision_recall_curve(line_width=2.0, hide_minor_ticks=True):
         plt.show()
     plt.close(fig)
 
+def plot_aggregated_pra(agg_df, line_width=2.0, hide_minor_ticks=True):
+    """
+    Plots an aggregated Precision-Recall curve with mean line and min-max shading.
+    agg_df should be indexed by 'tp' and contain 'mean', 'min', 'max' columns for precision.
+    """
+    config = dload("config")
+    plot_config = config["plotting"]
+    
+    # Increase figure width to accommodate external legend without squashing axes
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # Adjust layout to make room for legend on the right
+    plt.subplots_adjust(right=0.7)
+    
+    ax.set_xscale("log")
 
+    # optionally hide minor ticks on the log axis
+    if hide_minor_ticks:
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.xaxis.set_minor_formatter(NullFormatter())
 
-def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD', label_color='black', border_color='black', border_width=1.0):
+    # Filter out very low TP counts if necessary, similar to plot_precision_recall_curve
+    agg_df = agg_df[agg_df.index > 10]
+    
+    tp = agg_df.index
+    mean_prec = agg_df['mean']
+    min_prec = agg_df['min']
+    max_prec = agg_df['max']
+
+    # Plot shading
+    ax.fill_between(tp, min_prec, max_prec, color='gray', alpha=0.3, label='Range (Min-Max)')
+    
+    # Plot mean line
+    ax.plot(tp, mean_prec, c="black", label="Mean Precision", linewidth=line_width, alpha=0.9)
+
+    ax.set(title="",
+           xlabel="Number of True Positives (TP)",
+           ylabel="Precision")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.05, 1), frameon=False)
+    ax.set_ylim(0, 1)
+
+    # Nature style: no grid, open top/right spines
+    ax.grid(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    if plot_config["save_plot"]:
+        output_type = plot_config["output_type"]
+        output_path = Path(config["output_folder"]) / f"aggregated_precision_recall_curve.{output_type}"
+        fig.savefig(output_path, bbox_inches="tight", format=output_type)
+
+    if plot_config.get("show_plot", True):
+        plt.show()
+    plt.close(fig)
+
+def plot_iqr_pra(agg_df, line_width=2.0, hide_minor_ticks=True):
+    """
+    Plots an aggregated Precision-Recall curve with mean line and IQR (25-75%) shading.
+    agg_df should be indexed by 'tp' and contain 'mean', '25%', '75%' columns for precision.
+    """
+    config = dload("config")
+    plot_config = config["plotting"]
+    
+    # Increase figure width to accommodate external legend without squashing axes
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # Adjust layout to make room for legend on the right
+    plt.subplots_adjust(right=0.7)
+    
+    ax.set_xscale("log")
+
+    # optionally hide minor ticks on the log axis
+    if hide_minor_ticks:
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.xaxis.set_minor_formatter(NullFormatter())
+
+    # Filter out very low TP counts
+    agg_df = agg_df[agg_df.index > 10]
+    
+    tp = agg_df.index
+    mean_prec = agg_df['mean']
+    q25_prec = agg_df['25%']
+    q75_prec = agg_df['75%']
+
+    # Plot shading
+    ax.fill_between(tp, q25_prec, q75_prec, color='gray', alpha=0.3, label='IQR (25-75%)')
+    
+    # Plot mean line
+    ax.plot(tp, mean_prec, c="black", label="Mean Precision", linewidth=line_width, alpha=0.9)
+
+    ax.set(title="Precision-Recall (IQR)",
+           xlabel="Number of True Positives (TP)",
+           ylabel="Precision")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.05, 1), frameon=False)
+    ax.set_ylim(0, 1)
+
+    # Nature style
+    ax.grid(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    if plot_config["save_plot"]:
+        output_type = plot_config["output_type"]
+        output_path = Path(config["output_folder"]) / f"aggregated_iqr_precision_recall_curve.{output_type}"
+        fig.savefig(output_path, bbox_inches="tight", format=output_type)
+
+    if plot_config.get("show_plot", True):
+        plt.show()
+    plt.close(fig)
+
+def plot_all_runs_pra(pra_list, mean_df=None, line_width=2.0, hide_minor_ticks=True):
+    """
+    Plots all individual Precision-Recall curves faintly, with an optional mean line.
+    pra_list: list of dataframes (each with 'tp' and 'precision' columns) OR list of Series (if index is tp)
+    mean_df: optional dataframe with 'mean' column indexed by tp
+    """
+    config = dload("config")
+    plot_config = config["plotting"]
+    
+    fig, ax = plt.subplots(figsize=(6, 4))
+    plt.subplots_adjust(right=0.7)
+    
+    ax.set_xscale("log")
+
+    if hide_minor_ticks:
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.xaxis.set_minor_formatter(NullFormatter())
+
+    # Plot individual lines
+    for i, df in enumerate(pra_list):
+        # Ensure we filter low TPs same as others
+        df_filtered = df[df['tp'] > 10] if 'tp' in df.columns else df[df.index > 10]
+        
+        x = df_filtered['tp'] if 'tp' in df_filtered.columns else df_filtered.index
+        y = df_filtered['precision'] if 'precision' in df_filtered.columns else df_filtered.values
+        
+        # Only add label for the first line to avoid cluttering legend
+        lbl = "Individual Runs" if i == 0 else None
+        ax.plot(x, y, c="gray", linewidth=0.5, alpha=0.3, label=lbl)
+
+    # Plot mean line if provided
+    if mean_df is not None:
+        mean_df = mean_df[mean_df.index > 10]
+        ax.plot(mean_df.index, mean_df['mean'], c="black", label="Mean Precision", linewidth=line_width, alpha=0.9)
+
+    ax.set(title="Precision-Recall (All Runs)",
+           xlabel="Number of True Positives (TP)",
+           ylabel="Precision")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.05, 1), frameon=False)
+    ax.set_ylim(0, 1)
+
+    # Nature style
+    ax.grid(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    if plot_config["save_plot"]:
+        output_type = plot_config["output_type"]
+        output_path = Path(config["output_folder"]) / f"aggregated_all_runs_precision_recall_curve.{output_type}"
+        fig.savefig(output_path, bbox_inches="tight", format=output_type)
+
+    if plot_config.get("show_plot", True):
+        plt.show()
+    plt.close(fig)
+
+def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD', label_color='black', border_color='black', border_width=1.0, show_text_background=True):
     config = dload("config")
     plot_config = config["plotting"]
     rdict = dload("pra_percomplex")
@@ -119,7 +306,8 @@ def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD
         bg_df  = df.drop(index=significant_indices)
         sig_df = df.loc[significant_indices]
 
-        fig, ax = plt.subplots()
+        # Create square figure
+        fig, ax = plt.subplots(figsize=(6, 6))
 
         # Background cloud (filled dots with black borders, not rasterized)
         bg_sizes = (bg_df['n_used_genes'] if 'n_used_genes' in bg_df else pd.Series(1, index=bg_df.index)) * 5
@@ -138,7 +326,7 @@ def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD
             s=sig_sizes, linewidth=border_width, zorder=2
         )
 
-        # Label only significant with adaptive spacing
+        # Improved label positioning with adaptive spacing
         coords = sorted(
             [(sig_df.loc[idx, pair[0]], sig_df.loc[idx, pair[1]], idx) for idx in sig_df.index],
             key=lambda c: (-c[1], -c[0])
@@ -147,34 +335,69 @@ def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD
         # Calculate proper parameters for normalized coordinate system (0-1 range)
         max_y = 1.0  # Normalized plots use 0-1 range
         scale_factor = 1.0  # Standard scaling for normalized plots
-        min_distance = 0.05  # Appropriate spacing for 0-1 range
+        min_distance = 0.08  # Increased spacing for 0-1 range to avoid overlap
         
-        adjusted_coords = adjust_text_positions(
+        adjusted_coords = adjust_text_positions_improved(
             coords, sig_sizes,
             min_distance=min_distance,
             max_y=max_y,
-            scale_factor=scale_factor
+            scale_factor=scale_factor,
+            y_threshold=0.8  # Points above this will have labels below
         )
         
-        for x, adj_y, idx in adjusted_coords:
+        for x, adj_y, idx, direction in adjusted_coords:
             y = df.loc[idx, pair[1]]
-            ax.plot([x, x], [y, adj_y], color=label_color, linewidth=0.6, alpha=0.3, zorder=3)
+            
+            # Calculate connector line extension, but constrain within plot bounds
+            line_extension_factor = 1.5  # Reduced from 2.5 to keep labels in bounds
+            extended_adj_y = y + (adj_y - y) * line_extension_factor
+            
+            # Clip to ensure connector stays within 0-1 range
+            extended_adj_y = max(0.02, min(extended_adj_y, 0.98))
+            
+            # Draw connector line
+            ax.plot([x, x], [y, extended_adj_y], 
+                   color=label_color, linewidth=0.6, alpha=0.15, zorder=3)
+            
+            # Position text at the end of extended line with small offset
+            text_y_offset = 0.01 if direction == "up" else -0.01
+            final_text_y = extended_adj_y + text_y_offset
+            
+            # Final clip to ensure text stays within 0-1 range
+            final_text_y = max(0.02, min(final_text_y, 0.98))
+            
+            # Prepare text bbox settings (can be turned on/off)
+            bbox_props = dict(facecolor="white", alpha=0.7, edgecolor="none", pad=1) if show_text_background else None
+            
             ax.text(
-                x, adj_y + 0.005,
-                df.loc[idx, 'Name'][:15] + '..',
-                fontsize=4, ha='left', va='bottom', color=label_color,
-                linespacing=1.5, zorder=4,
-                #bbox=dict(facecolor="white", alpha=0.65, edgecolor="white", pad=1.2)
+                x, final_text_y,
+                df.loc[idx, 'Name'][:10] + '.' if len(df.loc[idx, 'Name']) > 10 else df.loc[idx, 'Name'],
+                fontsize=4,
+                ha='left', 
+                va='bottom' if direction == "up" else 'top',
+                color=label_color,
+                linespacing=1, 
+                zorder=4,
+                clip_on=True,  # Enable clipping to axes bounds
+                bbox=bbox_props
             )
 
         # Diagonal & axes cosmetics
         ax.plot([0, 1], [0, 1], linestyle='-', color='lightgray', alpha=0.4, linewidth=0.5, zorder=1)
-        padding = 0.02
-        ax.set_xlim(-padding, 1 + padding)
-        ax.set_ylim(-padding, 1 + padding)
+        
+        # Force square aspect ratio and exact 0-1 range
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect('equal', adjustable='box')
+        
+        # Set explicit ticks at 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
+        ticks = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        
         ax.set_xlabel(f"{pair[0]} PR-AUC score")
         ax.set_ylabel(f"{pair[1]} PR-AUC score")
-        ax.set_title(f"{pair[0]} vs {pair[1]} - Comparison of complex performance")
+        #ax.set_title(f"{pair[0]} vs {pair[1]} - Comparison of complex performance")
 
         # Nature style: no grid, open top/right spines
         ax.grid(False)
@@ -193,7 +416,136 @@ def plot_percomplex_scatter(n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD
 
         plt.close(fig)
 
+def adjust_text_positions_improved(coords, sizes, min_distance=0.08, max_y=1.0, scale_factor=1.0, y_threshold=0.8):
+    """
+    Enhanced text positioning with improved logic:
+    - Points above y_threshold get labels below
+    - Points below y_threshold get labels above
+    - Better overlap detection and resolution
+    """
+    adjusted = []
+    
+    # Base offset for lines (increased even more for better visibility)
+    base_offset = 0.1 * scale_factor  # Increased from 0.06 to 0.1
+    
+    # Sort coords by Y position (highest first) then by X
+    coords_sorted = sorted(coords, key=lambda c: (-c[1], c[0]))
+    
+    # Track occupied regions to prevent overlap
+    occupied_regions = []
+    
+    for x, y, idx in coords_sorted:
+        # Determine direction based on Y position
+        if y > y_threshold:
+            direction = "down"
+            adj_y = y - base_offset
+        else:
+            direction = "up"
+            adj_y = y + base_offset
+        
+        # Check for overlaps with existing labels
+        overlap_found = True
+        attempts = 0
+        max_attempts = 10
+        
+        while overlap_found and attempts < max_attempts:
+            overlap_found = False
+            
+            for occ_x, occ_y, occ_height in occupied_regions:
+                # Check if current label would overlap
+                x_overlap = abs(x - occ_x) < 0.15  # Horizontal proximity threshold
+                y_overlap = abs(adj_y - occ_y) < occ_height
+                
+                if x_overlap and y_overlap:
+                    overlap_found = True
+                    # Adjust position to avoid overlap
+                    if direction == "up":
+                        adj_y = occ_y + occ_height + 0.02
+                    else:
+                        adj_y = occ_y - occ_height - 0.02
+                    break
+            
+            attempts += 1
+        
+        # Ensure within bounds
+        if direction == "up":
+            adj_y = min(adj_y, max_y - 0.05)
+            adj_y = max(adj_y, y + base_offset)
+        else:
+            adj_y = max(adj_y, 0.05)
+            adj_y = min(adj_y, y - base_offset)
+        
+        # Add to occupied regions (x, y, approximate height)
+        occupied_regions.append((x, adj_y, 0.04))
+        
+        adjusted.append((x, adj_y, idx, direction))
+    
+    return adjusted
 
+# Alternative simplified version that groups nearby points
+def adjust_text_positions_grouped(coords, sizes, min_distance=0.08, max_y=1.0, scale_factor=1.0, y_threshold=0.8):
+    """
+    Group nearby points and stagger their labels to avoid overlap.
+    """
+    adjusted = []
+    
+    # Group points that are close together
+    groups = []
+    used = set()
+    
+    for i, (x1, y1, idx1) in enumerate(coords):
+        if i in used:
+            continue
+            
+        group = [(x1, y1, idx1)]
+        used.add(i)
+        
+        # Find nearby points
+        for j, (x2, y2, idx2) in enumerate(coords[i+1:], i+1):
+            if j in used:
+                continue
+            
+            # Check if points are close
+            if abs(x1 - x2) < 0.1 and abs(y1 - y2) < 0.1:
+                group.append((x2, y2, idx2))
+                used.add(j)
+        
+        groups.append(group)
+    
+    # Process each group
+    for group in groups:
+        if len(group) == 1:
+            # Single point - simple positioning
+            x, y, idx = group[0]
+            direction = "down" if y > y_threshold else "up"
+            base_offset = 0.06 * scale_factor
+            
+            if direction == "up":
+                adj_y = y + base_offset
+            else:
+                adj_y = y - base_offset
+            
+            adjusted.append((x, adj_y, idx, direction))
+        else:
+            # Multiple points - stagger them
+            group_sorted = sorted(group, key=lambda p: p[1], reverse=True)
+            
+            for i, (x, y, idx) in enumerate(group_sorted):
+                direction = "down" if y > y_threshold else "up"
+                base_offset = 0.06 * scale_factor
+                stagger_offset = i * 0.04 * scale_factor
+                
+                if direction == "up":
+                    adj_y = y + base_offset + stagger_offset
+                else:
+                    adj_y = y - base_offset - stagger_offset
+                
+                # Ensure within bounds
+                adj_y = max(0.05, min(adj_y, max_y - 0.05))
+                
+                adjusted.append((x, adj_y, idx, direction))
+    
+    return adjusted
 
 def smart_direction_assignment(point_y, y_max, min_safe_distance=20.0):
     """Determine the best direction for label placement based on Y position."""
@@ -206,7 +558,6 @@ def smart_direction_assignment(point_y, y_max, min_safe_distance=20.0):
         return "prefer_down"
     else:
         return "both_directions"
-
 
 def group_points_by_y_proximity(coords, y_tolerance=5.0):
     """Group points that have similar Y values (within tolerance)."""
@@ -230,7 +581,6 @@ def group_points_by_y_proximity(coords, y_tolerance=5.0):
         groups.append(current_group)
     
     return groups
-
 
 def adjust_text_positions(coords, sizes, min_distance=0.08, max_y=1.0, scale_factor=1.0):
     """Enhanced text positioning with adaptive spacing for dense clusters."""
@@ -338,7 +688,6 @@ def adjust_text_positions(coords, sizes, min_distance=0.08, max_y=1.0, scale_fac
     
     return adjusted
 
-
 def calculate_density_multiplier(group_size):
     """Calculate multiplier for spacing based on cluster density."""
     if group_size <= 3:
@@ -353,7 +702,6 @@ def calculate_density_multiplier(group_size):
         return 2.5
     else:  # 20+ points
         return 3.0 + (group_size - 20) * 0.1  # Progressive scaling for very dense clusters
-
 
 def calculate_adaptive_spacing(group_size, min_distance, text_height, max_y, density_multiplier):
     """Calculate adaptive vertical spacing between labels based on cluster density."""
@@ -370,7 +718,6 @@ def calculate_adaptive_spacing(group_size, min_distance, text_height, max_y, den
         adaptive_spacing = max(adaptive_spacing, 0.05)
     
     return adaptive_spacing
-
 
 def calculate_adaptive_base_offset(group_size, max_y, scale_factor, density_multiplier):
     """Calculate adaptive base offset (connector line height) based on cluster density."""
@@ -389,8 +736,167 @@ def calculate_adaptive_base_offset(group_size, max_y, scale_factor, density_mult
     
     return adaptive_offset
 
+def cluster_nearby_points(coords, cluster_threshold=0.1):
+    """
+    Group nearby points into clusters to handle overlapping labels intelligently.
+    """
+    clusters = []
+    used = set()
+    
+    for i, (x1, y1, idx1) in enumerate(coords):
+        if i in used:
+            continue
+        
+        cluster = [(x1, y1, idx1)]
+        used.add(i)
+        
+        # Find all points within cluster threshold
+        for j, (x2, y2, idx2) in enumerate(coords[i+1:], i+1):
+            if j in used:
+                continue
+            
+            # Calculate distance (normalized to data range)
+            x_dist = abs(x1 - x2) / 1.0  # X range is 0-1
+            y_dist = abs(y1 - y2) / max(coord[1] for coord in coords)  # Y range varies
+            distance = np.sqrt(x_dist**2 + y_dist**2)
+            
+            if distance < cluster_threshold:
+                cluster.append((x2, y2, idx2))
+                used.add(j)
+        
+        clusters.append(cluster)
+    
+    return clusters
 
-def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD', label_color='black', border_color='black', border_width=1.0):
+def position_cluster_labels(cluster, cluster_id, max_y, effective_max_y, label_color, ax, top_labels, show_text_background):
+    """
+    Position labels for a cluster of points using advanced anti-overlap strategies.
+    """
+    cluster_size = len(cluster)
+    
+    if cluster_size == 1:
+        # Single point - simple positioning
+        x, y, idx = cluster[0]
+        base_offset = max_y * 0.08
+        
+        label_y = y + base_offset
+        if label_y > effective_max_y:
+            label_y = max(y - base_offset, max_y * 0.05)
+        
+        connector_end = min(label_y, effective_max_y)
+        
+        # Draw connector line
+        ax.plot([x, x], [y, connector_end], 
+               color=label_color, linewidth=0.6, alpha=0.4, zorder=3)
+        
+        # Position text
+        text_x = x + 0.02 if x < 0.7 else x - 0.02
+        ha = 'left' if x < 0.7 else 'right'
+        
+        bbox_props = dict(facecolor="white", alpha=0.8, edgecolor="none", pad=1) if show_text_background else None
+        label_text = top_labels.loc[idx, 'Name'][:12] + '...' if len(top_labels.loc[idx, 'Name']) > 12 else top_labels.loc[idx, 'Name']
+        
+        ax.text(
+            text_x, connector_end + (max_y * 0.01),
+            label_text,
+            fontsize=5, ha=ha, va='bottom',
+            color=label_color, zorder=4,
+            clip_on=True, bbox=bbox_props
+        )
+        
+    elif cluster_size <= 3:
+        # Small cluster - vertical stacking with dynamic font size
+        cluster_center_x = np.mean([p[0] for p in cluster])
+        cluster_center_y = np.mean([p[1] for p in cluster])
+        
+        base_offset = max_y * 0.1
+        font_size = 4  # Smaller font for clusters
+        
+        for i, (x, y, idx) in enumerate(sorted(cluster, key=lambda p: p[1], reverse=True)):
+            # Stagger vertically with increased spacing
+            stagger = i * (max_y * 0.06)  # Increased spacing
+            label_y = cluster_center_y + base_offset + stagger
+            
+            if label_y > effective_max_y:
+                # Switch to downward stacking
+                label_y = cluster_center_y - base_offset - stagger
+                label_y = max(label_y, max_y * 0.05)
+            
+            connector_end = min(label_y, effective_max_y)
+            
+            # Draw connector line from original point
+            ax.plot([x, x], [y, connector_end], 
+                   color=label_color, linewidth=0.5, alpha=0.3, zorder=3)
+            
+            # Position text with alternating sides to reduce overlap
+            side_offset = 0.03 if i % 2 == 0 else -0.03
+            text_x = cluster_center_x + side_offset
+            text_x = max(0.02, min(text_x, 0.98))  # Keep within bounds
+            
+            ha = 'left' if side_offset > 0 else 'right'
+            
+            bbox_props = dict(facecolor="white", alpha=0.9, edgecolor="none", pad=0.5) if show_text_background else None
+            label_text = top_labels.loc[idx, 'Name'][:10] + '.' if len(top_labels.loc[idx, 'Name']) > 10 else top_labels.loc[idx, 'Name']
+            
+            ax.text(
+                text_x, connector_end + (max_y * 0.005),
+                label_text,
+                fontsize=font_size, ha=ha, va='bottom',
+                color=label_color, zorder=4,
+                clip_on=True, bbox=bbox_props
+            )
+    
+    else:
+        # Large cluster - radial/column arrangement with smaller text
+        cluster_center_x = np.mean([p[0] for p in cluster])
+        cluster_center_y = np.mean([p[1] for p in cluster])
+        
+        base_offset = max_y * 0.12
+        font_size = 3.5  # Even smaller font for dense clusters
+        
+        # Arrange in two columns to handle many labels
+        left_column = cluster[:len(cluster)//2]
+        right_column = cluster[len(cluster)//2:]
+        
+        for col_idx, column in enumerate([left_column, right_column]):
+            side = -1 if col_idx == 0 else 1  # Left or right side
+            
+            for i, (x, y, idx) in enumerate(column):
+                # Calculate position for this column
+                stagger = i * (max_y * 0.05)  # Vertical spacing
+                label_y = cluster_center_y + base_offset + stagger
+                
+                if label_y > effective_max_y:
+                    # Switch to downward if too high
+                    label_y = cluster_center_y - base_offset - stagger
+                    label_y = max(label_y, max_y * 0.05)
+                
+                connector_end = min(label_y, effective_max_y)
+                
+                # Draw connector line
+                ax.plot([x, x], [y, connector_end], 
+                       color=label_color, linewidth=0.4, alpha=0.25, zorder=3)
+                
+                # Position text in columns
+                text_x = cluster_center_x + (side * 0.04)  # Offset to left/right
+                text_x = max(0.02, min(text_x, 0.98))  # Keep within bounds
+                
+                ha = 'right' if side < 0 else 'left'
+                
+                bbox_props = dict(facecolor="white", alpha=0.95, edgecolor="none", pad=0.3) if show_text_background else None
+                label_text = top_labels.loc[idx, 'Name'][:8] + '.' if len(top_labels.loc[idx, 'Name']) > 8 else top_labels.loc[idx, 'Name']
+                
+                ax.text(
+                    text_x, connector_end,
+                    label_text,
+                    fontsize=font_size, ha=ha, va='bottom',
+                    color=label_color, zorder=4,
+                    clip_on=True, bbox=bbox_props
+                )
+
+def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', nonsig_color='#DBDDDD', 
+                                   label_color='black', border_color='black', border_width=1.0, 
+                                   show_text_background=True):
     config = dload("config")
     plot_config = config["plotting"]
     rdict = dload("pra_percomplex")
@@ -399,13 +905,20 @@ def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', n
         sorted_pc = per_complex.sort_values(by="auc_score", ascending=False, na_position="last")
         top_labels, rest = sorted_pc.head(n_labels), sorted_pc.iloc[n_labels:]
 
-        fig, ax = plt.subplots()
+        # Calculate data range for appropriate figure sizing
+        max_genes = sorted_pc.n_used_genes.max()
+        
+        # Use rectangular figure with appropriate aspect ratio
+        # X-axis is 0-1, Y-axis varies based on gene count data
+        aspect_ratio = max_genes / 100.0  # Scale based on gene count range
+        fig_height = min(max(4, aspect_ratio), 8)  # Between 4-8 inches
+        fig, ax = plt.subplots(figsize=(6, fig_height))
 
         # Background (REST): filled dots with black borders, not rasterized
         ax.scatter(
             rest.auc_score, rest.n_used_genes,
             facecolors=nonsig_color, edgecolors=border_color,
-            linewidth=border_width, s=rest.n_used_genes * 10,
+            linewidth=border_width, s=rest.n_used_genes * 5,
             alpha=1.0, label="Other Complexes",
             zorder=0
         )
@@ -414,34 +927,26 @@ def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', n
         ax.scatter(
             top_labels.auc_score, top_labels.n_used_genes,
             facecolors=sig_color, edgecolors=border_color,
-            linewidth=border_width, s=top_labels.n_used_genes * 10,
+            linewidth=border_width, s=top_labels.n_used_genes * 8,
             label=f"Top {n_labels} AUC Scores", alpha=1.0, zorder=2
         )
 
-        # Labels with corrected scaling
+        # Enhanced anti-overlap labeling system
         coords = [(row.auc_score, row.n_used_genes, idx) for idx, row in top_labels.iterrows()]
-        sizes = top_labels.n_used_genes * 10
-        max_y = sorted_pc.n_used_genes.max() + 50
+        max_y = sorted_pc.n_used_genes.max()
         
-        # Fix scaling issue - use reasonable scale factor
-        scale_factor = min(max_y / 100.0, 3.0)  # Cap scale factor to prevent extreme positioning
+        # Define plot boundaries with margins for text
+        plot_margin = max_y * 0.2  # Increased margin for complex layouts
+        effective_max_y = max_y + plot_margin
         
-        adjusted = adjust_text_positions(
-            coords, sizes,
-            min_distance=max(5.0, max_y * 0.02),  # Use reasonable spacing relative to Y range
-            max_y=max_y, 
-            scale_factor=scale_factor
-        )
-        for x, adj_y, idx in adjusted:
-            y = top_labels.loc[idx, "n_used_genes"]
-            ax.plot([x, x], [y, adj_y], color=label_color, linewidth=0.5, alpha=0.3, zorder=3)
-            ha = 'left' if x < 0.5 else 'right'
-            text_x = x + 0.01 if x < 0.5 else x - 0.01
-            ax.text(
-                text_x, adj_y + (0.005 * scale_factor),
-                top_labels.loc[idx, 'Name'][:15] + '..',
-                fontsize=4, ha=ha, va='bottom', color=label_color, linespacing=1.5, zorder=4,
-                bbox=dict(facecolor="white", alpha=0.65, edgecolor="white", pad=1.5)
+        # Cluster nearby points
+        clusters = cluster_nearby_points(coords, cluster_threshold=0.15)
+        
+        # Position labels for each cluster
+        for i, cluster in enumerate(clusters):
+            position_cluster_labels(
+                cluster, i, max_y, effective_max_y, 
+                label_color, ax, top_labels, show_text_background
             )
 
         # Set y-axis to show integer values only
@@ -449,16 +954,21 @@ def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', n
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax.set_xlabel("PR-AUC score")
         ax.set_ylabel("Number of genes in the complex")
-        ax.set_title(f"{key} - Complex performance: PR-AUC score vs complex size")
 
-        # No ruler + open spines
+        # Configure axes with proper boundaries
         ax.grid(visible=False, which='both', axis='both')
-        ax.set_xlim(0, 1.0); ax.set_ylim(0, max_y)
+        ax.set_xlim(0, 1.0)
+        ax.set_ylim(0, effective_max_y)  # Use effective max to include label space
+        
+        # Set explicit x-axis ticks at 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
+        x_ticks = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        ax.set_xticks(x_ticks)
+        
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
 
-        plt.subplots_adjust(right=0.8)
-        plt.tight_layout()
+        # Manual spacing adjustment instead of tight_layout to avoid warnings
+        plt.subplots_adjust(left=0.12, bottom=0.12, right=0.95, top=0.95)
 
         if plot_config["save_plot"]:
             output_type = plot_config["output_type"]
@@ -468,8 +978,6 @@ def plot_percomplex_scatter_bysize(n_labels=10, n_top=10, sig_color='#B71A2A', n
         if plot_config.get("show_plot", True):
             plt.show()
         plt.close(fig)
-
-
 
 def plot_complex_contributions(
     min_pairs=10,
@@ -539,7 +1047,7 @@ def plot_complex_contributions(
         ax[0].set_ylim(*y_lim)
         ax[0].set_xlabel(fig_labs[0])
         ax[0].set_ylabel(fig_labs[1])
-        ax[0].set_title(fig_title if fig_title else f"{key} - Contribution of complexes")
+        #ax[0].set_title(fig_title if fig_title else f"{key} - Contribution of complexes")
         for i in range(X.shape[0]):
             ax[0].fill_betweenx(y, x1[i, :], x2[i, :], color=colors[i], edgecolor='white')
 
@@ -575,12 +1083,15 @@ def plot_complex_contributions(
             plt.show()
         plt.close(fig)
 
-
-
 def plot_significant_complexes():
     config = dload("config")
     plot_config = config["plotting"]
     pra_percomplex = dload("pra_percomplex")
+    input_colors = dload("input", "colors")
+    
+    # Sanitize color keys
+    if input_colors:
+        input_colors = {_sanitize(k): v for k, v in input_colors.items()}
 
     thresholds = [0.1, 0.2, 0.3, 0.4, 0.5]
     datasets = list(pra_percomplex.keys())
@@ -588,22 +1099,40 @@ def plot_significant_complexes():
 
     df = pd.DataFrame(index=thresholds)
     for key, complex_data in pra_percomplex.items():
-        df[key] = [complex_data.query(f'auc_score >= {t}').shape[0] for t in thresholds]
+        if "corrected_auc_score" in complex_data.columns:
+            score_col = "corrected_auc_score"
+        else:
+            score_col = "auc_score"
+        df[key] = [complex_data.query(f'{score_col} >= {t}').shape[0] for t in thresholds]
 
     fig, ax = plt.subplots()
 
-    cmap = plt.get_cmap()
-    colors = [cmap(i / (num_datasets + 1)) for i in range(1, num_datasets + 1)]
+    # Color logic
+    cmap_name = config.get("color_map", "tab10")
+    try:
+        cmap = get_cmap(cmap_name)
+    except ValueError:
+        cmap = get_cmap("tab10")
+
+    if num_datasets <= 10 and cmap_name == "tab10":
+        default_colors = [cmap(i) for i in range(num_datasets)]
+    else:
+        default_colors = [cmap(float(i) / max(num_datasets - 1, 1)) for i in range(num_datasets)]
 
     bar_width = 0.8 / num_datasets
     for i, dataset in enumerate(datasets):
+        # Use override color if available
+        color = input_colors.get(dataset) if input_colors else None
+        if color is None:
+            color = default_colors[i]
+            
         x = np.arange(len(thresholds)) + i * bar_width
-        ax.bar(x, df[dataset], width=bar_width, color=colors[i], edgecolor='black', label=dataset)
+        ax.bar(x, df[dataset], width=bar_width, color=color, edgecolor='black', label=dataset)
 
     ax.set_xticks(np.arange(len(thresholds)) + (num_datasets - 1) * bar_width / 2)
     ax.set_xticklabels([str(t) for t in thresholds], rotation=0, ha='center')
 
-    ax.set_title("Number of significant complexes above PR-AUC thresholds")
+    #ax.set_title("Number of significant complexes above PR-AUC thresholds")
     ax.set_xlabel("PR-AUC score thresholds")
     ax.set_ylabel("Number of complexes")
 
@@ -627,12 +1156,15 @@ def plot_significant_complexes():
     plt.close(fig)
     return df
 
-
-
 def plot_auc_scores():
     config = dload("config")
     plot_config = config["plotting"]
     pra_dict = dload("pr_auc")
+    input_colors = dload("input", "colors")
+    
+    # Sanitize color keys
+    if input_colors:
+        input_colors = {_sanitize(k): v for k, v in input_colors.items()}
 
     sorted_items = sorted(pra_dict.items(), key=lambda x: x[1], reverse=True)
     datasets = [k for k, _ in sorted_items]
@@ -640,14 +1172,31 @@ def plot_auc_scores():
 
     fig, ax = plt.subplots()
 
-    cmap = plt.get_cmap()
+    # Color logic
+    cmap_name = config.get("color_map", "tab10")
+    try:
+        cmap = get_cmap(cmap_name)
+    except ValueError:
+        cmap = get_cmap("tab10")
+        
     num_datasets = len(datasets)
-    colors = [cmap(i / (num_datasets + 1)) for i in range(1, num_datasets + 1)]
+    if num_datasets <= 10 and cmap_name == "tab10":
+         default_colors = [cmap(i) for i in range(num_datasets)]
+    else:
+         default_colors = [cmap(float(i) / max(num_datasets - 1, 1)) for i in range(num_datasets)]
 
-    ax.bar(datasets, auc_scores, color=colors, edgecolor="black")
+    # Assign colors strictly matching the sorted dataset order
+    final_colors = []
+    for i, dataset in enumerate(datasets):
+        color = input_colors.get(dataset) if input_colors else None
+        if color is None:
+            color = default_colors[i]
+        final_colors.append(color)
+
+    ax.bar(datasets, auc_scores, color=final_colors, edgecolor="black")
 
     ax.set_ylim(0, max(auc_scores) + 0.01)
-    ax.set_title("AUC scores for the datasets")
+    #ax.set_title("AUC scores for the datasets")
     ax.set_ylabel("AUC score")
     plt.xticks(rotation=45, ha="right")
 
@@ -670,3 +1219,644 @@ def plot_auc_scores():
 
     plt.close(fig)
     return pra_dict
+
+# -----------------------------------------------------------------------------
+# mPR plots (Fig. 1E and Fig. 1F)
+# -----------------------------------------------------------------------------
+
+def plot_mpr_complexes(name, ax=None, save=True, outname=None):
+    """
+    Fig. 1F-style module-level PR:
+      x-axis: number of covered complexes (log)
+      y-axis: precision cutoff
+      x tick labels: 0, 2, 20, 200
+    """
+    mpr = dload("mpr", name)
+    if mpr is None:
+        raise RuntimeError(
+            f"plot_mpr_complexes(): mPR data for dataset '{name}' not found. "
+            "Run `mpr_prepare` first."
+        )
+
+    precision_cutoffs = np.asarray(mpr["precision_cutoffs"], dtype=float)
+    coverage = mpr["coverage_curves"]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4, 4))
+    else:
+        fig = ax.figure
+
+    labels = [
+        ("all", "all data"),
+        ("no_mtRibo_ETCI", "no mtRibo, ETC I"),
+        ("no_small_highAUPRC", "no small, high AUPRC"),
+    ]
+    styles = {
+        "all": {"linewidth": 1.8},
+        "no_mtRibo_ETCI": {"linewidth": 1.8, "linestyle": "--"},
+        "no_small_highAUPRC": {"linewidth": 1.8, "linestyle": ":"},
+    }
+
+    for key, pretty in labels:
+        if key not in coverage:
+            continue
+        cov = np.asarray(coverage[key], dtype=float)
+
+        # keep only positive coverage up to 200 complexes
+        mask = (cov > 0) & (cov <= 200)
+        if not mask.any():
+            continue
+
+        cov_plot = cov[mask]
+        prec_plot = precision_cutoffs[mask]
+
+        ax.plot(cov_plot, prec_plot, label=pretty, **styles.get(key, {}))
+
+    # log x-axis, show up to 200 complexes
+    ax.set_xscale("log")
+    ax.set_xlim(1, 200)  # 1 on log scale will be labelled as "0" below
+
+    ax.set_xlabel("Number of covered complexes")
+    ax.set_ylabel("Precision cutoff")
+    ax.set_ylim(0.0, 1.05)
+
+    # ticks at positions 1, 2, 20, 200 with labels 0, 2, 20, 200
+    tick_positions = [1, 2, 20, 200]
+    tick_labels = ["0", "2", "20", "200"]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+
+    ax.legend(frameon=False)
+    ax.set_title(f"[{name}] 19Q2 – mPR (#complexes vs precision)")
+
+    if save:
+        if outname is None:
+            outname = f"mpr_complexes_{name}.pdf"
+        fig.tight_layout()
+        fig.savefig(outname)
+
+    return ax
+
+def plot_mpr_tp(name, ax=None, save=True, outname=None):
+    """
+    Plot Fig. 1E-style TP vs precision curves for a dataset.
+
+    Uses the object created by `mpr_prepare(name)` and stored with key 'mpr'.
+    """
+    mpr = dload("mpr", name)
+    if mpr is None:
+        raise RuntimeError(
+            f"plot_mpr_tp(): mPR data for dataset '{name}' not found. "
+            "Run `mpr_prepare` first."
+        )
+
+    tp_curves = mpr["tp_curves"]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4, 4))
+    else:
+        fig = ax.figure
+
+    labels = [
+        ("all", "all data"),
+        ("no_mtRibo_ETCI", "no mtRibo, ETC I"),
+        ("no_small_highAUPRC", "no small, high AUPRC"),
+    ]
+    styles = {
+        "all": {"linewidth": 1.8},
+        "no_mtRibo_ETCI": {"linewidth": 1.8, "linestyle": "--"},
+        "no_small_highAUPRC": {"linewidth": 1.8, "linestyle": ":"},
+    }
+
+    xmax = 0.0
+    for key, pretty in labels:
+        if key not in tp_curves:
+            continue
+        data = tp_curves[key]
+        tp = np.asarray(data["tp"], dtype=float)
+        prec = np.asarray(data["precision"], dtype=float)
+        mask = np.isfinite(tp) & (tp > 0) & np.isfinite(prec) & (prec > 0)
+        if not mask.any():
+            continue
+        tp_plot = tp[mask]
+        prec_plot = prec[mask]
+        xmax = max(xmax, float(tp_plot.max()))
+        ax.plot(tp_plot, prec_plot, label=pretty, **styles.get(key, {}))
+
+    ax.set_xlabel("Number of true positives")
+    ax.set_ylabel("Precision")
+    ax.set_ylim(0.0, 1.05)
+
+    if xmax > 0:
+        ax.set_xscale("log")
+
+        # If we have enough TPs, start at 10; otherwise fall back.
+        if xmax > 10:
+            ax.set_xlim(10, xmax * 1.05)
+            logmin = 1  # 10^1 = 10
+        else:
+            ax.set_xlim(1, xmax * 1.05)
+            logmin = 0  # 10^0 = 1
+
+        logmax = int(np.ceil(np.log10(xmax)))
+        logmax = max(logmax, logmin)
+        xticks = [10 ** k for k in range(logmin, logmax + 1)]
+        ax.set_xticks(xticks)
+
+    ax.legend(frameon=False)
+    ax.set_title(f"{name} – PR (TP vs precision)")
+
+    if save:
+        if outname is None:
+            outname = f"mpr_tp_{name}.pdf"
+        fig.tight_layout()
+        fig.savefig(outname)
+
+    return ax
+
+"""
+Multi-dataset mPR plotting functions.
+
+Usage:
+    from pythonflex.plotting import plot_mpr_tp_multi, plot_mpr_complexes_multi
+    
+    # Plot multiple datasets
+    plot_mpr_tp_multi(["19Q2", "19Q4", "20Q1"])
+    plot_mpr_complexes_multi(["19Q2", "19Q4", "20Q1"])
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from pathlib import Path
+
+from .utils import dload
+from .logging_config import log
+
+# Default color palette (colorblind-friendly)
+DEFAULT_COLORS = [
+    "#4E79A7",  # blue
+    "#E15759",  # red
+    "#76B7B2",  # teal
+    "#F28E2B",  # orange
+    "#59A14F",  # green
+    "#EDC948",  # yellow
+    "#B07AA1",  # purple
+    "#FF9DA7",  # pink
+    "#9C755F",  # brown
+    "#BAB0AC",  # gray
+]
+
+# Filter line styles
+FILTER_STYLES = {
+    "all": {"linestyle": "-", "label": "all data"},
+    "no_mtRibo_ETCI": {"linestyle": "--", "label": "no mtRibo, ETC I"},
+    "no_small_highAUPRC": {"linestyle": "dotted", "label": "no small, high AUPRC"},
+}
+
+def plot_mpr_tp_multi(
+    dataset_names=None,
+    colors=None,
+    ax=None,
+    save=True,
+    outname=None,
+    linewidth=1.8,
+    show_filters=("all", "no_mtRibo_ETCI", "no_small_highAUPRC"),
+):
+    """
+    Plot TP vs precision curves for multiple datasets.
+    
+    Can auto-detect datasets or use provided dataset names.
+    Each dataset gets one color, each filter type gets one line style.
+    Two legends: one for datasets (colors), one for filters (line styles).
+    
+    Parameters
+    ----------
+    dataset_names : list of str, optional
+        Names of datasets to plot. If None, auto-detects available datasets.
+    colors : list of str, optional
+        Colors for each dataset. If None, uses default palette.
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on. If None, creates new figure.
+    save : bool
+        Whether to save the figure
+    outname : str, optional
+        Output filename. If None, auto-generated.
+    linewidth : float
+        Line width for all curves
+    show_filters : tuple of str
+        Which filters to show. Default is all three.
+    
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+    """
+    config = dload("config")
+    plot_config = config["plotting"]
+    input_colors = dload("input", "colors")
+    
+    # Sanitize color keys
+    if input_colors:
+        input_colors = {_sanitize(k): v for k, v in input_colors.items()}
+
+    # Auto-detect datasets if none provided
+    if dataset_names is None:
+        # Get all available MPR datasets from the storage
+        mpr_data_dict = dload("mpr")
+        if isinstance(mpr_data_dict, dict) and mpr_data_dict:
+            dataset_names = list(mpr_data_dict.keys())
+        else:
+            dataset_names = []
+        
+        if not dataset_names:
+            log.warning("No mPR datasets found. Make sure to run mpr_prepare() first.")
+            return None
+    
+    # Determine colors
+    if colors is None:
+        cmap_name = config.get("color_map", "tab10")
+        try:
+            cmap = get_cmap(cmap_name)
+        except ValueError:
+            cmap = get_cmap("tab10")
+
+        num_datasets = len(dataset_names)
+        if num_datasets <= 10 and cmap_name == "tab10":
+            default_colors = [cmap(i) for i in range(num_datasets)]
+        else:
+            default_colors = [cmap(float(i) / max(num_datasets - 1, 1)) for i in range(num_datasets)]
+
+        # Assign colors strictly matching the sorted dataset order
+        final_colors = []
+        for i, dataset in enumerate(dataset_names):
+            color = input_colors.get(dataset) if input_colors else None
+            # fallback to sanitized lookup just in case dataset_name is already sanitized but key isn't (or vice versa though we sanitized keys above)
+            if color is None:
+                 color = default_colors[i]
+            final_colors.append(color)
+        colors = final_colors
+    
+    if ax is None:
+        # Increase width slightly
+        fig, ax = plt.subplots(figsize=(6, 4))
+        # Reserve space for legend on right
+        plt.subplots_adjust(right=0.7)
+    else:
+        fig = ax.figure
+    
+    xmax = 0.0
+    
+    # Plot each dataset
+    for i, name in enumerate(dataset_names):
+        mpr = dload("mpr", name)
+        if mpr is None:
+            log.warning(f"mPR data for '{name}' not found, skipping.")
+            continue
+        
+        # Check if mPR data has expected structure
+        if "tp_curves" not in mpr:
+            log.warning(f"mPR data for '{name}' missing 'tp_curves', skipping.")
+            continue
+            
+        tp_curves = mpr["tp_curves"]
+        color = colors[i % len(colors)]
+        
+        for filter_key in show_filters:
+            if filter_key not in tp_curves:
+                continue
+            
+            data = tp_curves[filter_key]
+            if not isinstance(data, dict) or "tp" not in data or "precision" not in data:
+                log.warning(f"Invalid tp_curves data structure for '{name}' filter '{filter_key}', skipping.")
+                continue
+                
+            tp = np.asarray(data["tp"], dtype=float)
+            prec = np.asarray(data["precision"], dtype=float)
+            
+            mask = np.isfinite(tp) & (tp > 0) & np.isfinite(prec) & (prec > 0)
+            if not mask.any():
+                continue
+            
+            tp_plot = tp[mask]
+            prec_plot = prec[mask]
+            xmax = max(xmax, float(tp_plot.max()))
+            
+            style = FILTER_STYLES.get(filter_key, {})
+            ax.plot(
+                tp_plot, 
+                prec_plot, 
+                color=color,
+                linestyle=style.get("linestyle", "-"),
+                linewidth=linewidth,
+            )
+    
+    # Configure axes
+    ax.set_xlabel("Number of true positives")
+    ax.set_ylabel("Precision")
+    ax.set_ylim(0.0, 1.05)
+    
+    if xmax > 0:
+        ax.set_xscale("log")
+        if xmax > 10:
+            ax.set_xlim(10, xmax * 1.05)
+            logmin = 1
+        else:
+            ax.set_xlim(1, xmax * 1.05)
+            logmin = 0
+        
+        logmax = int(np.ceil(np.log10(xmax)))
+        logmax = max(logmax, logmin)
+        xticks = [10 ** k for k in range(logmin, logmax + 1)]
+        ax.set_xticks(xticks)
+    
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Create vertically stacked legends
+    _add_vertical_legend(ax, dataset_names, colors, show_filters, linewidth)
+    
+    # Save
+    if save:
+        output_type = plot_config.get("output_type", "pdf")
+        if outname is None:
+            outname = f"mpr_tp_multi.{output_type}"
+        
+        # Check if outname is just a filename or a full path
+        outpath = Path(outname)
+        if len(outpath.parts) == 1:
+             # Just a filename, prepend configured output folder
+             outpath = Path(config["output_folder"]) / outname
+
+        fig.tight_layout()
+        fig.savefig(outpath, bbox_inches="tight", format=output_type)
+    
+    return ax
+
+def plot_mpr_complexes_multi(
+    dataset_names=None,
+    colors=None,
+    ax=None,
+    save=True,
+    outname=None,
+    linewidth=1.8,
+    show_filters=("all", "no_mtRibo_ETCI", "no_small_highAUPRC"),
+):
+    """
+    Plot module-level PR (#complexes vs precision) for multiple datasets.
+    
+    Can auto-detect datasets or use provided dataset names.
+    Each dataset gets one color, each filter type gets one line style.
+    Two legends: one for datasets (colors), one for filters (line styles).
+    
+    Parameters
+    ----------
+    dataset_names : list of str, optional
+        Names of datasets to plot. If None, auto-detects available datasets.
+    colors : list of str, optional
+        Colors for each dataset. If None, uses default palette.
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on. If None, creates new figure.
+    save : bool
+        Whether to save the figure
+    outname : str, optional
+        Output filename. If None, auto-generated.
+    linewidth : float
+        Line width for all curves
+    show_filters : tuple of str
+        Which filters to show. Default is all three.
+    
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+    """
+    config = dload("config")
+    plot_config = config["plotting"]
+    input_colors = dload("input", "colors")
+    
+    # Sanitize color keys
+    if input_colors:
+        input_colors = {_sanitize(k): v for k, v in input_colors.items()}
+
+    # Auto-detect datasets if none provided
+    if dataset_names is None:
+        # Get all available MPR datasets from the storage
+        mpr_data_dict = dload("mpr")
+        if isinstance(mpr_data_dict, dict) and mpr_data_dict:
+            dataset_names = list(mpr_data_dict.keys())
+        else:
+            dataset_names = []
+        
+        if not dataset_names:
+            log.warning("No mPR datasets found. Make sure to run mpr_prepare() first.")
+            return None
+    
+    # Determine colors
+    if colors is None:
+        cmap_name = config.get("color_map", "tab10")
+        try:
+            cmap = get_cmap(cmap_name)
+        except ValueError:
+            cmap = get_cmap("tab10")
+
+        num_datasets = len(dataset_names)
+        if num_datasets <= 10 and cmap_name == "tab10":
+            default_colors = [cmap(i) for i in range(num_datasets)]
+        else:
+            default_colors = [cmap(float(i) / max(num_datasets - 1, 1)) for i in range(num_datasets)]
+
+        # Assign colors strictly matching the sorted dataset order
+        final_colors = []
+        for i, dataset in enumerate(dataset_names):
+            color = input_colors.get(dataset) if input_colors else None
+            # fallback to sanitized lookup just in case dataset_name is already sanitized but key isn't (or vice versa though we sanitized keys above)
+            if color is None:
+                 color = default_colors[i]
+            final_colors.append(color)
+        colors = final_colors
+    
+    if ax is None:
+        # Increase width slightly
+        fig, ax = plt.subplots(figsize=(6, 4))
+        # Reserve space for legend on right
+        plt.subplots_adjust(right=0.7)
+    else:
+        fig = ax.figure
+    
+    # Plot each dataset
+    for i, name in enumerate(dataset_names):
+        mpr = dload("mpr", name)
+        if mpr is None:
+            log.warning(f"mPR data for '{name}' not found, skipping.")
+            continue
+        
+        precision_cutoffs = np.asarray(mpr["precision_cutoffs"], dtype=float)
+        coverage = mpr["coverage_curves"]
+        color = colors[i % len(colors)]
+        
+        for filter_key in show_filters:
+            if filter_key not in coverage:
+                continue
+            
+            cov = np.asarray(coverage[filter_key], dtype=float)
+            
+            # Keep only positive coverage up to 200 complexes
+            mask = (cov > 0) & (cov <= 200)
+            if not mask.any():
+                continue
+            
+            cov_plot = cov[mask]
+            prec_plot = precision_cutoffs[mask]
+            
+            style = FILTER_STYLES.get(filter_key, {})
+            ax.plot(
+                cov_plot,
+                prec_plot,
+                color=color,
+                linestyle=style.get("linestyle", "-"),
+                linewidth=linewidth,
+            )
+    
+    # Configure axes
+    ax.set_xscale("log")
+    ax.set_xlim(1, 200)
+    ax.set_xlabel("# complexes")
+    ax.set_ylabel("Precision")
+    ax.set_ylim(0.0, 1.05)
+    
+    # Custom x-ticks
+    tick_positions = [1, 2, 20, 200]
+    tick_labels = ["0", "2", "20", "200"]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+    
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Create vertically stacked legends
+    _add_vertical_legend(ax, dataset_names, colors, show_filters, linewidth)
+    
+    # Save
+    if save:
+        output_type = plot_config.get("output_type", "pdf")
+        if outname is None:
+            outname = f"mpr_complexes_multi.{output_type}"
+        
+        # Check if outname is just a filename or a full path
+        outpath = Path(outname)
+        if len(outpath.parts) == 1:
+             # Just a filename, prepend configured output folder
+             outpath = Path(config["output_folder"]) / outname
+
+        fig.tight_layout()
+        fig.savefig(outpath, bbox_inches="tight", format=output_type)
+    
+    return ax
+
+def _add_vertical_legend(ax, dataset_names, colors, show_filters, linewidth):
+    """
+    Add vertically stacked legends: Dataset on top, Filter below.
+    """
+    # Legend 1: Datasets (colors) - solid lines
+    dataset_handles = []
+    for i, name in enumerate(dataset_names):
+        color = colors[i % len(colors)]
+        handle = Line2D([0], [0], color=color, linewidth=linewidth, linestyle="-")
+        dataset_handles.append(handle)
+    
+    # Legend 2: Filters (line styles) - black lines
+    filter_handles = []
+    filter_labels = []
+    for filter_key in show_filters:
+        style = FILTER_STYLES.get(filter_key, {})
+        handle = Line2D(
+            [0], [0], 
+            color="black", 
+            linewidth=linewidth, 
+            linestyle=style.get("linestyle", "-")
+        )
+        filter_handles.append(handle)
+        filter_labels.append(style.get("label", filter_key))
+    
+    # Position legends vertically with proper alignment
+    # Dataset legend on upper right
+    legend1 = ax.legend(
+        dataset_handles, 
+        dataset_names, 
+        loc="upper left",
+        frameon=False,
+        title="Dataset",
+        fontsize=7,
+        title_fontsize=8,
+        bbox_to_anchor=(1.05, 1.0)
+    )
+    ax.add_artist(legend1)
+    
+    # Filter legend below the dataset legend, aligned properly without title
+    legend2 = ax.legend(
+        filter_handles,
+        filter_labels,
+        loc="upper left",
+        frameon=False,
+        fontsize=7,
+        bbox_to_anchor=(1.05, 1.0 - len(dataset_names) * 0.06 - 0.1)
+    )
+
+def _add_dual_legend(ax, dataset_names, colors, show_filters, linewidth):
+    """
+    Add two legends: one for datasets (colors), one for filters (line styles).
+    """
+    # Legend 1: Datasets (colors) - solid lines
+    dataset_handles = []
+    for i, name in enumerate(dataset_names):
+        color = colors[i % len(colors)]
+        handle = Line2D([0], [0], color=color, linewidth=linewidth, linestyle="-")
+        dataset_handles.append(handle)
+    
+    # Legend 2: Filters (line styles) - black lines
+    filter_handles = []
+    filter_labels = []
+    for filter_key in show_filters:
+        style = FILTER_STYLES.get(filter_key, {})
+        handle = Line2D(
+            [0], [0], 
+            color="black", 
+            linewidth=linewidth, 
+            linestyle=style.get("linestyle", "-")
+        )
+        filter_handles.append(handle)
+        filter_labels.append(style.get("label", filter_key))
+    
+    # Position legends
+    # Dataset legend on upper right
+    legend1 = ax.legend(
+        dataset_handles, 
+        dataset_names, 
+        loc="upper right",
+        frameon=False,
+        title="Dataset",
+        fontsize=7,
+        title_fontsize=8,
+    )
+    ax.add_artist(legend1)
+    
+    # Filter legend on lower left or right depending on plot type
+    legend2 = ax.legend(
+        filter_handles,
+        filter_labels,
+        loc="lower left",
+        frameon=False,
+        title="Filter",
+        fontsize=7,
+        title_fontsize=8,
+    )
+
+# ============================================================================
+# Single dataset functions are now obsolete
+# ============================================================================
+
+# Note: The original single dataset functions plot_mpr_tp() and plot_mpr_complexes()
+# have been replaced by the multi functions that now auto-detect available datasets.
+# Use plot_mpr_tp_multi() and plot_mpr_complexes_multi() instead.

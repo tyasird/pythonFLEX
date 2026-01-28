@@ -21,6 +21,7 @@ inputs = {
 }
 
 
+
 #%%
 default_config = {
     "min_genes_in_complex": 0,
@@ -29,6 +30,7 @@ default_config = {
     "gold_standard": "CORUM",
     "color_map": "RdYlBu",
     "jaccard": True,
+    "use_common_genes": False,  # Set to False for individual dataset-gold standard intersections
     "plotting": {
         "save_plot": True,
         "output_type": "pdf",
@@ -73,16 +75,3 @@ flex.plot_complex_contributions()
 #%%
 # Save results to CSV
 flex.save_results_to_csv()
-
-
-
-
-
-
-
-
-
-
-
-
-

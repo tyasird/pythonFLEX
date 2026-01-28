@@ -4,13 +4,52 @@ import numpy as np
 from .utils import dsave, dload
 from tqdm import tqdm
 from .logging_config import log
-from importlib import resources
-from pathlib import Path
 tqdm.pandas()
+# Locate package data path once at module level
+from importlib.metadata import distribution
+from importlib.resources import files
+import json
+from pathlib import Path
+
+
+def return_package_dir():
+    try:
+        # Get the distribution
+        dist = distribution('pythonflex')
+
+        # Check for direct_url.json
+        try:
+            direct_url_text = dist.read_text('direct_url.json')
+        except FileNotFoundError:
+            direct_url_text = None
+
+        if direct_url_text:
+            direct_url = json.loads(direct_url_text)
+            if direct_url.get('dir_info', {}).get('editable'):
+                # Editable install detected
+                project_url = direct_url['url']
+                # Remove 'file:///' prefix and handle Windows paths
+                project_root = project_url.removeprefix('file:///').replace('/', os.sep)
+                # Assuming src layout: project_root/src/pythonflex
+                package_dir = os.path.join(project_root, 'src', 'pythonflex')
+            else:
+                # Non-editable
+                package_dir = str(files('pythonflex'))
+        else:
+            # No direct_url, assume non-editable
+            package_dir = str(files('pythonflex'))
+            
+    except Exception: # PackageNotFoundError or other issues
+        # Fallback to local directory relative to this file
+        # precise location: src/pythonflex/preprocessing.py -> package dir is parent
+        package_dir = str(Path(__file__).parent)
+
+    return package_dir
+
 
 
 def get_example_data_path(filename: str):
-    return resources.files("pythonflex.data").joinpath("dataset").joinpath(filename)
+    return files("pythonflex.data").joinpath("dataset").joinpath(filename)
 
 
 def _load_file(filepath, ext):
@@ -27,7 +66,9 @@ def _load_file(filepath, ext):
 
 
 def load_datasets(files, continue_with_common_genes=False):
-    preprocessing = dload("config")["preprocessing"]
+    config = dload("config")
+    preprocessing = config["preprocessing"]
+    use_common_genes = config.get("use_common_genes", True)
     data_dict= {}     
 
     for filename, meta in files.items():
@@ -61,21 +102,29 @@ def load_datasets(files, continue_with_common_genes=False):
         data_dict[filename] = df
 
     common_genes = get_common_genes(data_dict)
-    if continue_with_common_genes:
-        log.info(f"Continuing with common genes: {len(common_genes)}")
+
+    # Apply common gene filtering only if use_common_genes is True
+    if use_common_genes and (continue_with_common_genes or use_common_genes):
+        log.info(f"Applying common gene filtering: {len(common_genes)} genes")
         for filename, df in data_dict.items():
             if df.index.isin(common_genes).any():
                 data_dict[filename] = df.loc[common_genes]
+    elif not use_common_genes:
+        log.info(f"Skipping common gene filtering (use_common_genes=False). Common genes found: {len(common_genes)}")
     
     dsave({
         "datasets": data_dict,
         "sorting": {
             k: v.get("sort", "high") if isinstance(v, dict) else "high"
             for k, v in files.items()
+        },
+        "colors": {
+            k: v.get("color", None) if isinstance(v, dict) else None
+            for k, v in files.items()
         }
     }, "input")
     log.done(f"Datasets loaded.")
-    return data_dict, common_genes  
+    return data_dict  , common_genes
 
 
 
@@ -133,13 +182,14 @@ def filter_matrix_by_genes(matrix, genes_present_in_terms):
 
 def load_gold_standard():
     
+    package_dir = return_package_dir()
+    data_dir_path = os.path.join(package_dir, 'data')
+    
     config = dload("config") 
-    common_genes = dload("common", "common_genes")
+    use_common_genes = config.get("use_common_genes", True)
 
     gold_standard_source = config['gold_standard']
-    log.started(f"Loading gold standard: {gold_standard_source}, Min complex size: {config['min_genes_in_complex']}, Jaccard filtering: {config['jaccard']}")
-    if not common_genes:
-        raise ValueError("Common genes not found.")
+    log.started(f"Loading gold standard: {gold_standard_source}, Min complex size: {config['min_genes_in_complex']}, Jaccard filtering: {config['jaccard']}, use_common_genes: {use_common_genes}")
 
     # Define gold standard file paths for predefined sources
     gold_standard_files = {
@@ -147,11 +197,11 @@ def load_gold_standard():
         "GOBP": "gold_standard/GOBP.parquet",
         "PATHWAY": "gold_standard/PATHWAY.parquet"
     }
-
+    
     if gold_standard_source in gold_standard_files:
         # Load predefined gold standard from package resources
-        filename = gold_standard_files[gold_standard_source]
-        filename_path = resources.files("pythonflex.data").joinpath(filename)
+        filename = gold_standard_files[gold_standard_source] 
+        filename_path = Path(data_dir_path).joinpath(filename)
         if not filename_path.exists():  # Check if the file exists
             raise ValueError(f"Invalid Gold Standard type: {gold_standard_source}. File not found.")
         terms = pd.read_parquet(filename_path)  # type: ignore
@@ -165,27 +215,44 @@ def load_gold_standard():
     else:
         raise ValueError(f"Invalid gold standard source: {gold_standard_source}. Must be one of {list(gold_standard_files.keys())} or a path to a .csv file.")
 
-    common_genes_set = set(common_genes)
-    terms["used_genes"] = terms["Genes"].apply(lambda x: list(set(x.split(";")) & common_genes_set))
-    terms["n_used_genes"] = terms["used_genes"].apply(len)
-    log.info(f"Applying min_genes_in_complex filtering: {config['min_genes_in_complex']}")
-    terms = terms[terms["n_used_genes"] >= config['min_genes_in_complex']]
-    terms["hash"] = terms["used_genes"].apply(lambda x: [hash(i) for i in x])
+    # Store raw gold standard for later per-dataset filtering
+    terms["all_genes"] = terms["Genes"].apply(lambda x: list(set(x.split(";"))))
+    log.info(f"Gold standard loaded with {len(terms)} terms")
+
+    # Basic filtering by minimum complex size (before gene filtering)
+    terms["n_all_genes"] = terms["all_genes"].apply(len) 
+    terms = terms[terms["n_all_genes"] >= config['min_genes_in_complex']]
+    log.info(f"After min_genes_in_complex filtering: {len(terms)} terms")
 
     if config['jaccard']:
         log.info("Applying Jaccard filtering. Remove terms with identical gene sets.")
-        terms = filter_duplicate_terms(terms)
+        # Use all genes for jaccard filtering
+        terms["gene_set"] = terms["all_genes"].map(lambda x: frozenset(x))
+        grouped = terms.groupby("gene_set", sort=False)
+        duplicate_clusters = []
+        for _, group in grouped:
+            if len(group) > 1:
+                duplicate_clusters.append(group["ID"].values if "ID" in group.columns else group.index.values)
+        
+        keep_ids = set(terms["ID"] if "ID" in terms.columns else terms.index)
+        for cluster in duplicate_clusters:
+            sorted_ids = sorted(cluster)
+            keep_ids.difference_update(sorted_ids[1:])
+        
+        if "ID" in terms.columns:
+            terms = terms[terms["ID"].isin(keep_ids)].copy()
+        else:
+            terms = terms[terms.index.isin(keep_ids)].copy()
+        terms.drop(columns=["gene_set"], inplace=True, errors='ignore')
+        log.info(f"After Jaccard filtering: {len(terms)} terms")
 
-
-    genes_present_in_terms = list(set(terms["used_genes"].explode().unique()) & common_genes_set)
     # if there is column called "ID", set it as index
     if "ID" in terms.columns:
         terms = terms.set_index("ID")
 
     dsave(terms, "common", "terms")
-    dsave(genes_present_in_terms, "common", "genes_present_in_terms")
     log.done("Gold standard loading completed.")
-    return terms, genes_present_in_terms
+    return terms, None  # Return None for genes_present_in_terms - will be computed per dataset
 
 
 
