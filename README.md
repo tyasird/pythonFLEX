@@ -62,27 +62,31 @@ import pythonflex as flex
 inputs = {
     "Melanoma (63 Screens)": {
         "path": flex.get_example_data_path("melanoma_cell_lines_500_genes.csv"), 
-        "sort": "high"
+        "sort": "high",
+        "color": "#FF0000"
     },
     "Liver (24 Screens)": {
         "path": flex.get_example_data_path("liver_cell_lines_500_genes.csv"), 
-        "sort": "high"
+        "sort": "high",
+        "color": "#FFDD00"
     },
     "Neuroblastoma (37 Screens)": {
         "path": flex.get_example_data_path("neuroblastoma_cell_lines_500_genes.csv"), 
-        "sort": "high"
+        "sort": "high",
+        "color": "#FFDDDD"
     },
 }
 
 
 
 default_config = {
-    "min_genes_in_complex": 2,
-    "min_genes_per_complex_analysis": 2,
-    "output_folder": "output",
-    "gold_standard": "GOBP",
-    "color_map": "RdYlBu",
-    "jaccard": True,
+    "min_genes_in_complex": 0,
+    "min_genes_per_complex_analysis": 3,
+    "output_folder": "CORUM",
+    "gold_standard": "CORUM",
+    "color_map": "BuGn",
+    "jaccard": False,
+    "use_common_genes": False,  # Set to False for individual dataset-gold standard intersections
     "plotting": {
         "save_plot": True,
         "output_type": "png",
@@ -93,10 +97,10 @@ default_config = {
     },
     "corr_function": "numpy",
     "logging": {  
-        "visible_levels": ["DONE","STARTED"]  # "PROGRESS", "STARTED", ,"INFO","WARNING"
+        "visible_levels": ["DONE"]  
+        # "PROGRESS", "STARTED", ,"INFO","WARNING"
     }
 }
-
 
 # Initialize logger, config, and output folder
 flex.initialize(default_config)
@@ -107,19 +111,25 @@ terms, genes_in_terms = flex.load_gold_standard()
 
 # Run analysis
 for name, dataset in data.items():
-    df, pr_auc = flex.pra(name, dataset)
+    pra = flex.pra(name, dataset, is_corr=False)
     fpc = flex.pra_percomplex(name, dataset, is_corr=False) 
     cc = flex.complex_contributions(name)
+    flex.mpr_prepare(name)  
 
+
+#%%
 # Generate plots
-flex.plot_auc_scores()
 flex.plot_precision_recall_curve()
-flex.plot_percomplex_scatter()
-flex.plot_percomplex_scatter_bysize()
+flex.plot_auc_scores()
 flex.plot_significant_complexes()
+flex.plot_percomplex_scatter(n_top=20)
+flex.plot_percomplex_scatter_bysize()
 flex.plot_complex_contributions()
+##
+flex.plot_mpr_tp_multi()
+flex.plot_mpr_complexes_multi()
 
-# Save Result CSVspyflex.save_results_to_csv()
+# Save results to CSV
 flex.save_results_to_csv()
 
 
