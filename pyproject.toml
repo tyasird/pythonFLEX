@@ -7,7 +7,14 @@ authors = [
     { name = "Yasir Demirtaş", email = "tyasird@hotmail.com" }
 ]
 requires-python = ">=3.9"
-
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 
 # Exclude the input folder
 exclude = ["src/pythonflex/input/*", "src/pythonflex/output/*", "src/pythonflex/examples/output/*", 
@@ -67,3 +74,4 @@ pythonflex = { workspace = true }
 dev = [
     "pythonflex",
 ]
+
