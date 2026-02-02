@@ -1,5 +1,14 @@
 # pythonFLEX
 
+![PyPI](https://img.shields.io/badge/pypi-v0.3.1-orange)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Build](https://img.shields.io/badge/build-passing-brightgreen)
+![Build system](https://img.shields.io/badge/build-hatchling-blue)
+![Lint](https://img.shields.io/badge/lint-ruff-46a2f1)
+![CLI](https://img.shields.io/badge/CLI-pythonflex-brightgreen)
+
+
 🧬 **pythonFLEX** is a benchmarking toolkit for evaluating CRISPR screen results against biological gold standards. It provides precision-recall analysis using reference gene sets from CORUM protein complexes, Gene Ontology Biological Processes (GO-BP), KEGG pathways, and other curated resources. The toolkit computes gene-level and complex-level performance metrics, helping researchers systematically assess the biological relevance and resolution of their CRISPR screening data.
 
 
